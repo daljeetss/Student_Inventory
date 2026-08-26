@@ -1,56 +1,110 @@
-# Welcome to your Expo app 👋
+# Tutoring Tracker
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A private app for tracking students, weekly class schedules, attendance
+(including makeup sessions), and monthly billing with a one-tap WhatsApp
+reminder to parents.
 
-## Get started
+Built with [Expo](https://expo.dev) (React Native), so the same app runs on
+iPhone, Android (Samsung), and the web — with data stored on-device for now
+(see "Cross-device sync" below for the optional next step).
 
-1. Install dependencies
+## Running it
 
-   ```bash
-   npm install
-   ```
+There are two ways to get it onto a phone. **Option A is recommended** —
+it installs as a real home-screen icon that opens instantly and doesn't
+need any app installed first.
 
-2. Start the app
+### Option A: home-screen icon via a local token-gated server (recommended)
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+npm run serve
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+This builds the app and starts a small local server, printing something
+like:
 
-### Other setup steps
+```
+On this computer:  http://localhost:8899/?token=puZty2Ygf-hYJCQyPSfMSw
+From your phone:   http://192.168.1.225:8899/?token=puZty2Ygf-hYJCQyPSfMSw
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+1. Make sure the phone is on the **same Wi-Fi network** as this computer.
+2. Open the "From your phone" link in Safari (iPhone) or Chrome (Samsung) —
+   just once.
+3. Add it to the home screen:
+   - **iPhone (Safari):** Share button → "Add to Home Screen"
+   - **Samsung (Chrome):** ⋮ menu → "Add to Home screen" / "Install app"
 
-## Learn more
+The icon reopens the app full-screen, already signed in — the token is
+remembered (via the link the first time, then a cookie), so nobody has to
+type it again. The token itself just keeps this off-limits to anyone else
+on the Wi-Fi network who doesn't have the link; it's saved in
+`server/access-token.txt` if you ever need to look it up.
 
-To learn more about developing your project with Expo, look at the following resources:
+Leave the `npm run serve` terminal running (or the Mac awake) while the app
+is in use — same as Option B, it's served live from this computer. After
+you change the app's code, stop it (Ctrl+C) and run `npm run serve` again
+to rebuild before reopening the icon.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### Option B: Expo Go (for active development)
 
-## Join the community
+1. Install [Expo Go](https://expo.dev/go) on your phone (App Store / Play Store) — free.
+2. From this folder, start the dev server:
 
-Join our community of developers creating universal apps.
+   ```
+   npm start
+   ```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+3. A QR code appears in the terminal. Scan it with your phone's camera
+   (iPhone) or the Expo Go app's scanner (Android) — the app opens instantly.
+   Your phone and computer must be on the same Wi-Fi network.
+4. To run it in a browser instead: `npm run web`.
+
+This mode live-reloads as code changes, which makes it better suited to
+active development than daily use — leave the `npm start` terminal running
+while using the app.
+
+## How it works
+
+- **Students** — add each student with their grade, parent's name/WhatsApp
+  number, and their per-session rate.
+- **Classes** — set up each recurring weekly class (1-on-1 or group), who's
+  in it, and what day/time it meets. The **Today** tab automatically shows
+  what's scheduled for any given day based on this.
+- **Today** — tap a class to mark each student present/absent. If someone's
+  absent, you can immediately schedule a one-off makeup session (any date,
+  time, or class type) linked back to the missed class.
+- **Billing** — pick a month; it totals each student's attended sessions
+  (regular + makeup) × their rate. Tap **Send via WhatsApp** to open a
+  pre-filled reminder message to the parent — you just hit send. Mark
+  payments as paid in full, partial, or unpaid as money comes in.
+
+All data is stored locally on the device (AsyncStorage on phones,
+localStorage on web) — nothing leaves the device today.
+
+## Cross-device sync (optional next step)
+
+Right now, each device (your wife's phone, your computer's browser, etc.)
+keeps its own separate copy of the data. If you want the same data to show
+up everywhere — e.g. mark attendance on the phone during class, then review
+billing on the computer later — the next step is wiring up a free Firebase
+project (Firestore + Auth) as a shared backend. Ask your assistant to set
+this up when you're ready; it takes a Firebase account (free) and a few
+config values from the Firebase console.
+
+## Project structure
+
+```
+src/
+  app/            expo-router screens (file-based routing)
+    (tabs)/       the 4 main tabs: Today, Students, Classes, Billing
+    student/      add/view/edit a student
+    group/        add/view/edit a recurring class
+    session/      mark attendance for one class occurrence
+  components/     shared UI (buttons, cards, form fields, chip-select)
+  data/           the data model, local storage, and business logic
+    types.ts      Student / ClassGroup / SessionRecord / Payment shapes
+    store.tsx     React context: all reads/writes go through useAppData()
+    whatsapp.ts   builds the due-amount message + opens the wa.me link
+    date.ts       date/time formatting helpers
+```
