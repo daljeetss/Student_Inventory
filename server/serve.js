@@ -27,6 +27,8 @@ const ROOT = path.join(__dirname, '..');
 const DIST_DIR = path.join(ROOT, 'dist');
 const ICONS_DIR = path.join(__dirname, 'icons');
 const TOKEN_FILE = path.join(__dirname, 'access-token.txt');
+const DATA_FILE = path.join(__dirname, 'data.json');
+const MAX_BODY_BYTES = 5 * 1024 * 1024; // the whole app's data; generous but not unbounded
 const PORT = Number(process.env.PORT) || 8899;
 
 const APP_NAME = 'Tutoring Tracker';
@@ -41,6 +43,44 @@ function getOrCreateToken() {
   const token = crypto.randomBytes(16).toString('base64url');
   fs.writeFileSync(TOKEN_FILE, token);
   return token;
+}
+
+// The app's whole data set lives in this one file on the Mac, so every
+// device that opens the app through this server (phones, browser) shares
+// the same data -- instead of each device's browser storage having its own
+// separate, less durable copy.
+function readDataFile() {
+  try {
+    return fs.readFileSync(DATA_FILE, 'utf8');
+  } catch {
+    return '{}';
+  }
+}
+
+function writeDataFile(raw) {
+  // write-then-rename so a crash mid-write can't leave a half-written,
+  // unparseable data.json behind.
+  const tmp = `${DATA_FILE}.tmp`;
+  fs.writeFileSync(tmp, raw);
+  fs.renameSync(tmp, DATA_FILE);
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }
 
 function localIp() {
@@ -138,13 +178,19 @@ function serveStaticFile(req, res, filePath, cookieToSet) {
     if (err) return send(res, 404, 'Not found', 'text/plain');
     const ext = path.extname(filePath);
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    const headers = cookieToSet ? { 'Set-Cookie': cookieToSet } : undefined;
+    // index.html is the entry point that names the current hashed JS/CSS
+    // bundle -- it must always be revalidated, or a phone that cached it
+    // from before a rebuild would keep launching old code indefinitely.
+    // The hashed asset files themselves (entry-<hash>.js etc.) are safe to
+    // cache hard, since any code change gives them a new filename anyway.
+    const cacheControl = ext === '.html' ? 'no-cache, must-revalidate' : 'public, max-age=31536000, immutable';
+    const headers = { 'Cache-Control': cacheControl, ...(cookieToSet ? { 'Set-Cookie': cookieToSet } : {}) };
 
     if (ext === '.html') {
       const html = data.toString('utf8').replace('</head>', HEAD_INJECTION);
       return send(res, 200, html, contentType, headers);
     }
-    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': data.length, ...(headers || {}) });
+    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': data.length, ...headers });
     res.end(data);
   });
 }
@@ -157,7 +203,15 @@ function main() {
 
   const token = getOrCreateToken();
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
+    try {
+      await handleRequest(req, res, token);
+    } catch (err) {
+      send(res, 500, JSON.stringify({ ok: false, error: String(err && err.message) }), 'application/json');
+    }
+  });
+
+  async function handleRequest(req, res, token) {
     const url = new URL(req.url, 'http://internal');
     const pathname = decodeURIComponent(url.pathname);
 
@@ -165,7 +219,7 @@ function main() {
     // before the browser has ever been authorized.
     if (pathname === '/manifest.json') {
       const tok = isAuthorized(req, token) ? token : null;
-      return send(res, 200, JSON.stringify(buildManifest(tok)), 'application/manifest+json');
+      return send(res, 200, JSON.stringify(buildManifest(tok)), 'application/manifest+json', { 'Cache-Control': 'no-store' });
     }
     if (pathname.startsWith('/icons/')) {
       return serveStaticFile(req, res, path.join(ICONS_DIR, path.basename(pathname)));
@@ -173,6 +227,25 @@ function main() {
 
     if (!isAuthorized(req, token)) {
       return send(res, 401, UNAUTHORIZED_HTML, 'text/html');
+    }
+
+    // The app's data, stored on this computer instead of in each device's
+    // browser storage -- every device using this server sees the same data.
+    if (pathname === '/api/data') {
+      if (req.method === 'GET') {
+        return send(res, 200, readDataFile(), 'application/json', { 'Cache-Control': 'no-store' });
+      }
+      if (req.method === 'POST') {
+        try {
+          const body = await readRequestBody(req);
+          JSON.parse(body); // validate before persisting -- never save unparseable data
+          writeDataFile(body);
+          return send(res, 200, JSON.stringify({ ok: true }), 'application/json', { 'Cache-Control': 'no-store' });
+        } catch (err) {
+          return send(res, 400, JSON.stringify({ ok: false, error: String(err.message || err) }), 'application/json');
+        }
+      }
+      return send(res, 405, JSON.stringify({ ok: false, error: 'Method not allowed' }), 'application/json');
     }
 
     const suppliedToken = url.searchParams.get('token');
@@ -191,7 +264,7 @@ function main() {
       filePath = path.join(DIST_DIR, 'index.html');
     }
     serveStaticFile(req, res, filePath, cookieToSet);
-  });
+  }
 
   server.listen(PORT, '0.0.0.0', () => {
     const ip = localIp();

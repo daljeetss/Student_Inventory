@@ -33,8 +33,10 @@ yarn-error.*
 # local env files
 .env*.local
 
-# access token for the "npm run serve" home-screen-app server
+# access token + live data for the "npm run serve" home-screen-app server
 server/access-token.txt
+server/data.json
+server/data.json.tmp
 
 # typescript
 *.tsbuildinfo

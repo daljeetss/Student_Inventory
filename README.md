@@ -79,18 +79,29 @@ while using the app.
   pre-filled reminder message to the parent — you just hit send. Mark
   payments as paid in full, partial, or unpaid as money comes in.
 
-All data is stored locally on the device (AsyncStorage on phones,
-localStorage on web) — nothing leaves the device today.
+**Where the data lives depends on how you're running it:**
+- Via `npm run serve` (recommended, see below) — all data lives in one file
+  on this computer, `server/data.json`. Every device that opens the app
+  through this server (your wife's phone, your phone, a browser on this
+  computer) reads and writes that same file, so they all show the same
+  data. This is also why it survives restarting the server: the file isn't
+  touched by starting/stopping the Node process.
+- Via Expo Go or `npm run web` (dev mode) — there's no server-side API in
+  that mode, so it falls back to on-device storage (AsyncStorage on phones,
+  localStorage on web), separate per device. This only matters for active
+  development; day-to-day use should go through `npm run serve`.
 
-## Cross-device sync (optional next step)
+## Beyond the home Wi-Fi (optional next step)
 
-Right now, each device (your wife's phone, your computer's browser, etc.)
-keeps its own separate copy of the data. If you want the same data to show
-up everywhere — e.g. mark attendance on the phone during class, then review
-billing on the computer later — the next step is wiring up a free Firebase
-project (Firestore + Auth) as a shared backend. Ask your assistant to set
-this up when you're ready; it takes a Firebase account (free) and a few
-config values from the Firebase console.
+`npm run serve`'s shared data only works for devices on the same Wi-Fi as
+this computer (and only while the computer's awake and the server's
+running). If you want it reachable — and staying in sync — from anywhere,
+not just at home, the next step is either:
+- **Tailscale**, so the phones can reach this same server from any network, or
+- a free Firebase project (Firestore + Auth), which moves the data to the
+  cloud entirely instead of living on this computer.
+
+Ask your assistant to set either of these up when you're ready.
 
 ## Project structure
 

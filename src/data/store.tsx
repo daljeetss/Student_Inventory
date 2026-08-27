@@ -251,8 +251,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
           let payment = data.payments.find((p) => p.studentId === student.id && p.month === monthKey);
           if (!payment) {
+            // Deterministic id (not makeId()) -- this same not-yet-saved
+            // payment gets computed fresh on every call (e.g. once to
+            // render the list, again inside recordPayment's lookup), so a
+            // random id here would mean those two calls never agree on
+            // what the "same" payment is called, breaking every button
+            // that acts on a payment before it's been saved for the first
+            // time.
             payment = {
-              id: makeId('pay'),
+              id: `pay_${student.id}_${monthKey}`,
               studentId: student.id,
               month: monthKey,
               amountDue,
