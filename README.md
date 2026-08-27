@@ -5,8 +5,10 @@ A private app for tracking students, weekly class schedules, attendance
 reminder to parents.
 
 Built with [Expo](https://expo.dev) (React Native), so the same app runs on
-iPhone, Android (Samsung), and the web — with data stored on-device for now
-(see "Cross-device sync" below for the optional next step).
+iPhone, Android (Samsung), and the web. When run the recommended way (`npm
+run serve`, below), all data lives in one shared file on your computer, so
+every device sees the same students/classes/billing. See
+[DESIGN.md](./DESIGN.md) for how the pieces fit together.
 
 ## Running it
 
@@ -35,11 +37,14 @@ From your phone:   http://192.168.1.225:8899/?token=puZty2Ygf-hYJCQyPSfMSw
    - **iPhone (Safari):** Share button → "Add to Home Screen"
    - **Samsung (Chrome):** ⋮ menu → "Add to Home screen" / "Install app"
 
-The icon reopens the app full-screen, already signed in — the token is
-remembered (via the link the first time, then a cookie), so nobody has to
-type it again. The token itself just keeps this off-limits to anyone else
-on the Wi-Fi network who doesn't have the link; it's saved in
-`server/access-token.txt` if you ever need to look it up.
+The icon reopens the app full-screen, already signed in — the app saves the
+token from that first link and re-sends it automatically after that, so
+nobody has to type it again. The token itself just keeps this off-limits to
+anyone else on the Wi-Fi network who doesn't have the link; it's saved in
+`server/access-token.txt` if you ever need to look it up. (See
+[DESIGN.md](./DESIGN.md#access-token) for exactly how that works — it's not
+just a cookie, deliberately, because those aren't reliable inside an
+installed home-screen app.)
 
 Leave the `npm run serve` terminal running (or the Mac awake) while the app
 is in use — same as Option B, it's served live from this computer. After
@@ -113,9 +118,18 @@ src/
     group/        add/view/edit a recurring class
     session/      mark attendance for one class occurrence
   components/     shared UI (buttons, cards, form fields, chip-select)
-  data/           the data model, local storage, and business logic
+  data/           the data model, storage, and business logic
     types.ts      Student / ClassGroup / SessionRecord / Payment shapes
     store.tsx     React context: all reads/writes go through useAppData()
+    storage.ts    talks to the server's /api/data when available, else
+                  falls back to on-device storage (see DESIGN.md)
     whatsapp.ts   builds the due-amount message + opens the wa.me link
     date.ts       date/time formatting helpers
+
+server/           the "npm run serve" home-screen-app server (see DESIGN.md)
+  serve.js        static file server + token auth + /api/data
+  icons/          generated app icons (192/512/apple-touch)
+  access-token.txt, data.json   generated at runtime, not committed
 ```
+
+See [DESIGN.md](./DESIGN.md) for how these pieces talk to each other.
