@@ -4,23 +4,23 @@ import { ScrollView, StyleSheet, View, ViewProps } from 'react-native';
 import { MaxContentWidth } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
-interface ScreenProps extends ViewProps {
-  scroll?: boolean;
-}
-
-/** Consistent themed page container, centered on wide (web) viewports. */
-export function Screen({ children, style, scroll = true, ...rest }: ScreenProps) {
+/** Consistent themed, scrollable page container, centered on wide (web)
+ * viewports. Always scrolls -- a non-scrolling variant used to exist here,
+ * but on web a plain View with no bounded height doesn't reliably scroll
+ * its content even if a child (e.g. a long list) overflows it, so every
+ * screen just uses this one, including ones that render their list with
+ * a plain .map() instead of FlatList (lists here are small enough that
+ * FlatList's virtualization isn't needed). */
+export function Screen({ children, style, ...rest }: ViewProps) {
   const theme = useTheme();
-  const Wrapper = scroll ? ScrollView : View;
-  const wrapperProps = scroll ? { contentContainerStyle: styles.scrollContent } : { style: styles.scrollContent };
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]} edges={['top']}>
-      <Wrapper {...wrapperProps}>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={[styles.content, style]} {...rest}>
           {children}
         </View>
-      </Wrapper>
+      </ScrollView>
     </SafeAreaView>
   );
 }

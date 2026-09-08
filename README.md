@@ -78,7 +78,11 @@ while using the app.
   what's scheduled for any given day based on this.
 - **Today** — tap a class to mark each student present/absent. If someone's
   absent, you can immediately schedule a one-off makeup session (any date,
-  time, or class type) linked back to the missed class.
+  time, or class type) linked back to the missed class. Each class also has
+  a **Remind via WhatsApp** button for an on-demand "you have class..."
+  nudge — pick which student (for a group class), edit the pre-filled
+  message, then send. The same button is on the **Classes** tab too, for
+  reminding about a recurring class in general rather than one specific day.
 - **Billing** — pick a month; it totals each student's attended sessions
   (regular + makeup) × their rate. Tap **Send via WhatsApp** to open a
   pre-filled reminder message to the parent — you just hit send. Mark

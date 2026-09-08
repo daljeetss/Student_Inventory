@@ -130,6 +130,16 @@ erDiagram
     }
 ```
 
+**Automatic backups.** Every write to `data.json` snapshots whatever was
+there *before* the write into `server/backups/data-<timestamp>.json` first
+(best-effort, never blocks the actual save; the oldest snapshots beyond the
+most recent ~200 get pruned). This exists because real user data was lost
+once — testing directly against the live `data.json`, then deleting it
+during cleanup — and needed to be recovered from a browser's local storage.
+Never modify `server/data.json` directly (by hand or via a raw `curl`/API
+call for "testing") without treating it exactly like the user's real data,
+because it might be; use a separate file/path for anything experimental.
+
 All four types are plain JSON, defined in
 [`src/data/types.ts`](./src/data/types.ts) — there's no ORM or schema
 migration system; `server/data.json` is just `{ students, groups, sessions,

@@ -2,12 +2,15 @@ import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 
+import { ClassReminderButton } from '@/components/class-reminder-button';
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
-import { addDays, formatTime, toDateKey } from '@/data/date';
+import { addDays, formatDateLabel, formatTime, toDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
+import { Student } from '@/data/types';
+import { buildClassReminderMessage } from '@/data/whatsapp';
 import { useTheme } from '@/hooks/use-theme';
 
 export default function TodayScreen() {
@@ -27,6 +30,11 @@ export default function TodayScreen() {
     if (marked.length < occ.studentIds.length) return { label: 'Partially marked', tone: 'warning' as const };
     const allPresent = occ.studentIds.every((id) => occ.attendance[id] === 'present');
     return allPresent ? { label: 'All present', tone: 'primary' as const } : { label: 'Has absences', tone: 'danger' as const };
+  };
+
+  const reminderMessage = (occ: (typeof occurrences)[number], student: Student) => {
+    const whenLabel = occ.date === toDateKey(new Date()) ? `today at ${formatTime(occ.startTime)}` : `on ${formatDateLabel(occ.date)} at ${formatTime(occ.startTime)}`;
+    return buildClassReminderMessage(student.name, student.parentName, whenLabel);
   };
 
   return (
@@ -67,24 +75,24 @@ export default function TodayScreen() {
       <View style={{ gap: 10 }}>
         {occurrences.map((occ) => {
           const summary = summarize(occ);
+          const students = occ.studentIds.map((id) => data.students.find((s) => s.id === id)).filter((s): s is Student => !!s);
           return (
-            <Card
-              key={occ.id}
-              onPress={() =>
-                router.push({ pathname: '/session/[id]', params: { id: occ.id, date: occ.date } })
-              }>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <View>
-                  <ThemedText type="smallBold">
-                    {formatTime(occ.startTime)} · {occ.groupName}
-                    {occ.isMakeup ? ' (makeup)' : ''}
-                  </ThemedText>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    {occ.studentIds.map(studentName).join(', ')}
-                  </ThemedText>
+            <Card key={occ.id}>
+              <Pressable onPress={() => router.push({ pathname: '/session/[id]', params: { id: occ.id, date: occ.date } })}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <View>
+                    <ThemedText type="smallBold">
+                      {formatTime(occ.startTime)} · {occ.groupName}
+                      {occ.isMakeup ? ' (makeup)' : ''}
+                    </ThemedText>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      {occ.studentIds.map(studentName).join(', ')}
+                    </ThemedText>
+                  </View>
+                  <Badge label={summary.label} tone={summary.tone} />
                 </View>
-                <Badge label={summary.label} tone={summary.tone} />
-              </View>
+              </Pressable>
+              <ClassReminderButton students={students} buildMessage={(student) => reminderMessage(occ, student)} />
             </Card>
           );
         })}

@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { FlatList, View } from 'react-native';
+import { View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
@@ -14,7 +14,7 @@ export default function StudentsScreen() {
   const students = [...data.students].sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
 
   return (
-    <Screen scroll={false} style={{ flex: 1 }}>
+    <Screen>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
         <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
           Students
@@ -26,12 +26,9 @@ export default function StudentsScreen() {
         <ThemedText themeColor="textSecondary">No students yet. Tap "+ Add" to add your first one.</ThemedText>
       )}
 
-      <FlatList
-        data={students}
-        keyExtractor={(s) => s.id}
-        contentContainerStyle={{ gap: 10, paddingBottom: 24 }}
-        renderItem={({ item }) => (
-          <Card onPress={() => router.push(`/student/${item.id}`)}>
+      <View style={{ gap: 10 }}>
+        {students.map((item) => (
+          <Card key={item.id} onPress={() => router.push(`/student/${item.id}`)}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
               <ThemedText type="smallBold">{item.name}</ThemedText>
               {!item.active && <Badge label="Inactive" tone="textSecondary" />}
@@ -43,8 +40,8 @@ export default function StudentsScreen() {
               ${item.ratePerSession.toFixed(2)} / session
             </ThemedText>
           </Card>
-        )}
-      />
+        ))}
+      </View>
     </Screen>
   );
 }

@@ -37,6 +37,7 @@ yarn-error.*
 server/access-token.txt
 server/data.json
 server/data.json.tmp
+server/backups/
 
 # typescript
 *.tsbuildinfo

@@ -58,7 +58,7 @@ export default function BillingScreen() {
   };
 
   return (
-    <Screen scroll={false} style={{ flex: 1 }}>
+    <Screen>
       <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
         Billing
       </ThemedText>

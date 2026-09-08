@@ -28,6 +28,8 @@ const DIST_DIR = path.join(ROOT, 'dist');
 const ICONS_DIR = path.join(__dirname, 'icons');
 const TOKEN_FILE = path.join(__dirname, 'access-token.txt');
 const DATA_FILE = path.join(__dirname, 'data.json');
+const BACKUPS_DIR = path.join(__dirname, 'backups');
+const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest get pruned
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // the whole app's data; generous but not unbounded
 const PORT = Number(process.env.PORT) || 8899;
 
@@ -57,7 +59,27 @@ function readDataFile() {
   }
 }
 
+// Snapshot whatever's currently on disk before overwriting it, so a bad
+// write (bad data from a client, or -- as happened once -- a person
+// testing against this same file by hand) is always recoverable. Cheap at
+// this data's size, and never overwrites; each snapshot is a new file.
+function backupCurrentData() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return;
+    fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    fs.copyFileSync(DATA_FILE, path.join(BACKUPS_DIR, `data-${stamp}.json`));
+    const files = fs.readdirSync(BACKUPS_DIR).filter((f) => f.startsWith('data-')).sort();
+    for (const old of files.slice(0, Math.max(0, files.length - MAX_BACKUPS))) {
+      fs.unlinkSync(path.join(BACKUPS_DIR, old));
+    }
+  } catch {
+    // best-effort -- never let a backup failure block the actual save
+  }
+}
+
 function writeDataFile(raw) {
+  backupCurrentData();
   // write-then-rename so a crash mid-write can't leave a half-written,
   // unparseable data.json behind.
   const tmp = `${DATA_FILE}.tmp`;
