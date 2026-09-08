@@ -27,10 +27,25 @@ const ROOT = path.join(__dirname, '..');
 const DIST_DIR = path.join(ROOT, 'dist');
 const ICONS_DIR = path.join(__dirname, 'icons');
 const TOKEN_FILE = path.join(__dirname, 'access-token.txt');
-const DATA_FILE = path.join(__dirname, 'data.json');
-const BACKUPS_DIR = path.join(__dirname, 'backups');
-const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest get pruned
-const MAX_BODY_BYTES = 5 * 1024 * 1024; // the whole app's data; generous but not unbounded
+
+// All real data lives here, as one plain JSON array per file, nowhere else.
+// This folder is not to be touched for testing/experiments, ever -- set
+// TUTORING_DATA_DIR to point a test run at some other directory instead of
+// risking real data (see DESIGN.md).
+const PRODUCTION_DIR = process.env.TUTORING_DATA_DIR
+  ? path.resolve(process.env.TUTORING_DATA_DIR)
+  : path.join(ROOT, 'production');
+const BACKUPS_DIR = path.join(PRODUCTION_DIR, 'backups');
+const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest snapshots get pruned
+
+// One file per entity, related to each other by the id fields already in
+// the data model (Student.id, ClassGroup.studentIds, SessionRecord.groupId
+// /studentIds, the makeup file's makeupForRecordId, Payment.studentId) --
+// never one big blob, so a bad write to one can't take the others with it.
+const RESOURCES = ['students', 'classes', 'attendance', 'makeup', 'payments'];
+const resourceFile = (resource) => path.join(PRODUCTION_DIR, `${resource}.json`);
+
+const MAX_BODY_BYTES = 5 * 1024 * 1024; // one resource file's worth; generous but not unbounded
 const PORT = Number(process.env.PORT) || 8899;
 
 const APP_NAME = 'Tutoring Tracker';
@@ -47,44 +62,59 @@ function getOrCreateToken() {
   return token;
 }
 
-// The app's whole data set lives in this one file on the Mac, so every
-// device that opens the app through this server (phones, browser) shares
-// the same data -- instead of each device's browser storage having its own
-// separate, less durable copy.
-function readDataFile() {
+// Every device that opens the app through this server (phones, browser)
+// reads/writes these same files, instead of each device's browser storage
+// holding its own separate, less durable copy.
+function readResourceFile(resource) {
   try {
-    return fs.readFileSync(DATA_FILE, 'utf8');
+    return fs.readFileSync(resourceFile(resource), 'utf8');
   } catch {
-    return '{}';
+    return '[]';
   }
 }
 
-// Snapshot whatever's currently on disk before overwriting it, so a bad
-// write (bad data from a client, or -- as happened once -- a person
-// testing against this same file by hand) is always recoverable. Cheap at
-// this data's size, and never overwrites; each snapshot is a new file.
-function backupCurrentData() {
+// Snapshot the *entire* production folder as it stands right now, before
+// any single write -- so there's always a coherent, whole point-in-time
+// copy to recover from, not just the one file that happened to change.
+// This exists because real user data was lost once (testing directly
+// against the live file, then deleting it during cleanup); never skip this
+// to save time, and never point PRODUCTION_DIR at this for a test run.
+function backupProductionSnapshot() {
   try {
-    if (!fs.existsSync(DATA_FILE)) return;
-    fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+    fs.mkdirSync(PRODUCTION_DIR, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    fs.copyFileSync(DATA_FILE, path.join(BACKUPS_DIR, `data-${stamp}.json`));
-    const files = fs.readdirSync(BACKUPS_DIR).filter((f) => f.startsWith('data-')).sort();
-    for (const old of files.slice(0, Math.max(0, files.length - MAX_BACKUPS))) {
-      fs.unlinkSync(path.join(BACKUPS_DIR, old));
+    const dest = path.join(BACKUPS_DIR, stamp);
+    let copiedAnything = false;
+    for (const resource of RESOURCES) {
+      const src = resourceFile(resource);
+      if (fs.existsSync(src)) {
+        fs.mkdirSync(dest, { recursive: true });
+        fs.copyFileSync(src, path.join(dest, `${resource}.json`));
+        copiedAnything = true;
+      }
+    }
+    if (!copiedAnything) return; // nothing existed yet -- nothing to snapshot
+
+    const snapshots = fs
+      .readdirSync(BACKUPS_DIR)
+      .filter((f) => fs.statSync(path.join(BACKUPS_DIR, f)).isDirectory())
+      .sort();
+    for (const old of snapshots.slice(0, Math.max(0, snapshots.length - MAX_BACKUPS))) {
+      fs.rmSync(path.join(BACKUPS_DIR, old), { recursive: true, force: true });
     }
   } catch {
     // best-effort -- never let a backup failure block the actual save
   }
 }
 
-function writeDataFile(raw) {
-  backupCurrentData();
+function writeResourceFile(resource, raw) {
+  backupProductionSnapshot();
+  const filePath = resourceFile(resource);
   // write-then-rename so a crash mid-write can't leave a half-written,
-  // unparseable data.json behind.
-  const tmp = `${DATA_FILE}.tmp`;
+  // unparseable file behind.
+  const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, raw);
-  fs.renameSync(tmp, DATA_FILE);
+  fs.renameSync(tmp, filePath);
 }
 
 function readRequestBody(req) {
@@ -251,17 +281,21 @@ function main() {
       return send(res, 401, UNAUTHORIZED_HTML, 'text/html');
     }
 
-    // The app's data, stored on this computer instead of in each device's
-    // browser storage -- every device using this server sees the same data.
-    if (pathname === '/api/data') {
+    // The app's data, stored on this computer (in production/, one file per
+    // entity) instead of in each device's browser storage -- every device
+    // using this server sees the same data.
+    const resourceMatch = pathname.match(/^\/api\/(students|classes|attendance|makeup|payments)$/);
+    if (resourceMatch) {
+      const resource = resourceMatch[1];
       if (req.method === 'GET') {
-        return send(res, 200, readDataFile(), 'application/json', { 'Cache-Control': 'no-store' });
+        return send(res, 200, readResourceFile(resource), 'application/json', { 'Cache-Control': 'no-store' });
       }
       if (req.method === 'POST') {
         try {
           const body = await readRequestBody(req);
-          JSON.parse(body); // validate before persisting -- never save unparseable data
-          writeDataFile(body);
+          const parsed = JSON.parse(body); // validate before persisting -- never save unparseable data
+          if (!Array.isArray(parsed)) throw new Error(`Expected a JSON array for ${resource}`);
+          writeResourceFile(resource, body);
           return send(res, 200, JSON.stringify({ ok: true }), 'application/json', { 'Cache-Control': 'no-store' });
         } catch (err) {
           return send(res, 400, JSON.stringify({ ok: false, error: String(err.message || err) }), 'application/json');
@@ -300,7 +334,8 @@ function main() {
     console.log('  Open that link once in Safari/Chrome, then use "Add to');
     console.log('  Home Screen" -- the icon will reopen already signed in.');
     console.log('');
-    console.log(`  Token saved to server/access-token.txt  (Ctrl+C to stop)`);
+    console.log(`  Data:  ${PRODUCTION_DIR}`);
+    console.log(`  Token: server/access-token.txt  (Ctrl+C to stop)`);
     console.log('='.repeat(62));
   });
 }

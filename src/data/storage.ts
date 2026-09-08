@@ -2,16 +2,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 // A tiny key/value abstraction so the rest of the app never has to think
-// about which platform or server setup it's running under.
+// about which platform or server setup it's running under. `key` here is a
+// resource name -- "students", "classes", "attendance", "makeup", or
+// "payments" -- one independent value per entity type, never one combined
+// blob (see server/serve.js and DESIGN.md for why: a bad write to one
+// entity must never be able to corrupt or wipe out the others).
 //
 // - Native (Expo Go / a real build): AsyncStorage, same as always.
-// - Web: prefer the server-side `/api/data` endpoint (see server/serve.js)
+// - Web: prefer the server-side `/api/<key>` endpoint (see server/serve.js)
 //   so every device pointed at the same server shares one copy of the data,
 //   instead of each phone's browser storage holding its own separate,
 //   less durable copy. If that endpoint isn't there -- e.g. running via
 //   `expo start --web` during development, which has no such route --
 //   fall back to localStorage so dev mode keeps working unchanged.
-const API_PATH = '/api/data';
 const ACCESS_TOKEN_KEY = 'tutoring_access_token';
 
 // The server accepts the access token via a cookie, but a browser's
@@ -40,9 +43,9 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return { ...(token ? { 'X-Dashboard-Token': token } : {}), ...extra };
 }
 
-async function apiGet(): Promise<{ ok: true; value: string } | { ok: false }> {
+async function apiGet(resource: string): Promise<{ ok: true; value: string } | { ok: false }> {
   try {
-    const res = await fetch(API_PATH, { credentials: 'same-origin', headers: apiHeaders() });
+    const res = await fetch(`/api/${resource}`, { credentials: 'same-origin', headers: apiHeaders() });
     if (!res.ok) return { ok: false };
     return { ok: true, value: await res.text() };
   } catch {
@@ -50,9 +53,9 @@ async function apiGet(): Promise<{ ok: true; value: string } | { ok: false }> {
   }
 }
 
-async function apiSet(value: string): Promise<boolean> {
+async function apiSet(resource: string, value: string): Promise<boolean> {
   try {
-    const res = await fetch(API_PATH, {
+    const res = await fetch(`/api/${resource}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
@@ -66,7 +69,7 @@ async function apiSet(value: string): Promise<boolean> {
 
 export async function getItem(key: string): Promise<string | null> {
   if (Platform.OS === 'web') {
-    const fromApi = await apiGet();
+    const fromApi = await apiGet(key);
     if (fromApi.ok) return fromApi.value;
     try {
       return window.localStorage.getItem(key);
@@ -87,7 +90,7 @@ export async function setItem(key: string, value: string): Promise<void> {
     } catch {
       // ignore (e.g. private browsing quota errors)
     }
-    await apiSet(value);
+    await apiSet(key, value);
     return;
   }
   await AsyncStorage.setItem(key, value);

@@ -89,12 +89,16 @@ while using the app.
   payments as paid in full, partial, or unpaid as money comes in.
 
 **Where the data lives depends on how you're running it:**
-- Via `npm run serve` (recommended, see below) — all data lives in one file
-  on this computer, `server/data.json`. Every device that opens the app
-  through this server (your wife's phone, your phone, a browser on this
-  computer) reads and writes that same file, so they all show the same
-  data. This is also why it survives restarting the server: the file isn't
-  touched by starting/stopping the Node process.
+- Via `npm run serve` (recommended, see below) — all data lives in the
+  `production/` folder on this computer, one file per kind of data
+  (students, classes, attendance, makeup, payments — see
+  [DESIGN.md](./DESIGN.md) for exactly how). Every device that opens the
+  app through this server (your wife's phone, your phone, a browser on this
+  computer) reads and writes those same files, so they all show the same
+  data. This is also why it survives restarting the server: those files
+  aren't touched by starting/stopping the Node process. `production/` is
+  automatically backed up before every single save (into
+  `production/backups/`) and is never to be used for testing.
 - Via Expo Go or `npm run web` (dev mode) — there's no server-side API in
   that mode, so it falls back to on-device storage (AsyncStorage on phones,
   localStorage on web), separate per device. This only matters for active
@@ -125,15 +129,19 @@ src/
   data/           the data model, storage, and business logic
     types.ts      Student / ClassGroup / SessionRecord / Payment shapes
     store.tsx     React context: all reads/writes go through useAppData()
-    storage.ts    talks to the server's /api/data when available, else
-                  falls back to on-device storage (see DESIGN.md)
-    whatsapp.ts   builds the due-amount message + opens the wa.me link
+    storage.ts    talks to the server's /api/<resource> endpoints when
+                  available, else falls back to on-device storage
+    whatsapp.ts   builds the due-amount/reminder messages + wa.me links
     date.ts       date/time formatting helpers
 
 server/           the "npm run serve" home-screen-app server (see DESIGN.md)
-  serve.js        static file server + token auth + /api/data
+  serve.js        static file server + token auth + /api/<resource>
   icons/          generated app icons (192/512/apple-touch)
-  access-token.txt, data.json   generated at runtime, not committed
+  access-token.txt   generated at runtime, not committed
+
+production/       ALL real data lives here -- never touch for testing.
+  students.json, classes.json, attendance.json, makeup.json, payments.json
+  backups/        automatic snapshot of the whole folder before every save
 ```
 
 See [DESIGN.md](./DESIGN.md) for how these pieces talk to each other.

@@ -17,8 +17,8 @@ flowchart LR
     end
 
     subgraph Mac["Your Mac — npm run serve"]
-        S["server/serve.js<br/>(token auth + static files + /api/data)"]
-        D[("server/data.json")]
+        S["server/serve.js<br/>(token auth + static files + /api/&lt;resource&gt;)"]
+        D[("production/<br/>students.json, classes.json,<br/>attendance.json, makeup.json,<br/>payments.json")]
         W["dist/<br/>(built web app)"]
     end
 
@@ -26,15 +26,24 @@ flowchart LR
     B -- Wi-Fi --> S
     C -- localhost --> S
     S -- serves --> W
-    S <-->|GET/POST /api/data| D
+    S <-->|GET/POST /api/students etc.| D
 ```
 
 All three devices talk to the **same** `server/serve.js` process, which
-reads/writes one file, `server/data.json` — that's the entire "database."
-There's no separate backend or cloud service. This is what makes the
-students/classes/billing consistent across your wife's phone, your phone,
-and the Mac's browser, as long as they're all on the same Wi-Fi and the
-server's running.
+reads/writes the files in `production/` — that's the entire "database,"
+one plain JSON array per entity, nowhere else. There's no separate backend
+or cloud service. This is what makes the students/classes/billing
+consistent across your wife's phone, your phone, and the Mac's browser, as
+long as they're all on the same Wi-Fi and the server's running.
+
+`production/` is not to be touched for anything but real use — no testing,
+no seeding fixtures, nothing (see [Automatic backups](#data-model) below
+for why this is a hard rule now, not just a good idea). To test something
+against a scratch data set instead, point the server at a different folder:
+
+```
+TUTORING_DATA_DIR=/tmp/some-test-folder node server/serve.js
+```
 
 **Dev mode is different.** Running via `npm start` (Expo Go) or `npm run
 web` doesn't start `server/serve.js` at all — there's no `/api/data` to
@@ -69,14 +78,14 @@ sequenceDiagram
     App->>Server: GET /?token=XYZ
     Server-->>App: index.html + Set-Cookie (best-effort, not relied on)
     Note over App: storage.ts reads ?token=XYZ from the URL<br/>and saves it to localStorage
-    App->>Server: GET /api/data  (header: X-Dashboard-Token: XYZ)
-    Server-->>App: 200 current data
-    App->>Server: POST /api/data (header: X-Dashboard-Token: XYZ)
+    App->>Server: GET /api/students  (header: X-Dashboard-Token: XYZ)
+    Server-->>App: 200 current students
+    App->>Server: POST /api/students (header: X-Dashboard-Token: XYZ)
     Server-->>App: 200 {ok: true}
 ```
 
 The token travels as an explicit `X-Dashboard-Token` header on every
-`/api/data` call, sourced from a value the client captured and stored
+`/api/<resource>` call, sourced from a value the client captured and stored
 itself — not from the cookie jar. The cookie is still set as a
 belt-and-suspenders extra, but nothing depends on it working.
 
@@ -89,13 +98,17 @@ cache lifetimes only on the hashed, content-addressed JS/CSS bundle files
 
 ## Data model
 
+Five files in `production/`, each a plain JSON array, related to each
+other by id fields rather than by nesting:
+
 ```mermaid
 erDiagram
-    STUDENT ||--o{ SESSION_RECORD : "attendance tracked per"
+    STUDENT ||--o{ ATTENDANCE : "attendance tracked per"
+    STUDENT ||--o{ MAKEUP : "attendance tracked per"
     STUDENT ||--o{ PAYMENT : "billed monthly"
     CLASS_GROUP ||--o{ STUDENT : "enrolls"
-    CLASS_GROUP ||--o{ SESSION_RECORD : "generates occurrences of"
-    SESSION_RECORD ||--o| SESSION_RECORD : "makeup compensates for"
+    CLASS_GROUP ||--o{ ATTENDANCE : "generates occurrences of"
+    ATTENDANCE ||--o| MAKEUP : "missed session compensated by"
 
     STUDENT {
         string id
@@ -111,18 +124,28 @@ erDiagram
         string name
         string type "one-on-one or group"
         array schedule "weekly day/time slots"
+        array studentIds "-> STUDENT.id"
         boolean active
     }
-    SESSION_RECORD {
+    ATTENDANCE {
         string id
         string date
         string startTime
-        boolean isMakeup
-        string makeupForRecordId "optional"
+        string groupId "-> CLASS_GROUP.id"
+        array studentIds "-> STUDENT.id"
+        object attendance "studentId to present/absent"
+    }
+    MAKEUP {
+        string id
+        string date "the one-off makeup date"
+        string startTime
+        string makeupForRecordId "-> ATTENDANCE.id"
+        array studentIds "-> STUDENT.id, usually just one"
         object attendance "studentId to present/absent"
     }
     PAYMENT {
         string id "pay_studentId_monthKey — see below"
+        string studentId "-> STUDENT.id"
         string month "YYYY-MM"
         number amountDue
         number amountPaid
@@ -130,20 +153,26 @@ erDiagram
     }
 ```
 
-**Automatic backups.** Every write to `data.json` snapshots whatever was
-there *before* the write into `server/backups/data-<timestamp>.json` first
-(best-effort, never blocks the actual save; the oldest snapshots beyond the
-most recent ~200 get pruned). This exists because real user data was lost
-once — testing directly against the live `data.json`, then deleting it
-during cleanup — and needed to be recovered from a browser's local storage.
-Never modify `server/data.json` directly (by hand or via a raw `curl`/API
-call for "testing") without treating it exactly like the user's real data,
-because it might be; use a separate file/path for anything experimental.
+`production/students.json`, `classes.json`, `attendance.json`,
+`makeup.json`, and `payments.json` are each exactly one of the arrays
+above, and that's the entire "schema" — no ORM, no migrations. In memory
+(`src/data/store.tsx`), attendance + makeup are combined into one
+`sessions` list for convenience (the calendar/billing logic doesn't care
+which file a record came from, only its `isMakeup` flag, which still
+exists on the shared `SessionRecord` type in
+[`src/data/types.ts`](./src/data/types.ts)) — persisting always splits
+them back apart by that same flag before writing.
 
-All four types are plain JSON, defined in
-[`src/data/types.ts`](./src/data/types.ts) — there's no ORM or schema
-migration system; `server/data.json` is just `{ students, groups, sessions,
-payments }` serialized directly.
+**Automatic backups.** Every write to any of these files snapshots the
+*entire* `production/` folder as it stood immediately before, into
+`production/backups/<timestamp>/` (best-effort, never blocks the actual
+save; the oldest snapshots beyond the most recent ~200 get pruned). This
+exists because real user data was lost once — testing directly against the
+live data file, then deleting it during cleanup — and needed to be
+recovered from a browser's local storage. **`production/` is never to be
+used for testing, ever** — point `server/serve.js` at a different folder
+via the `TUTORING_DATA_DIR` environment variable for anything experimental
+instead.
 
 ### Session occurrences: virtual until touched
 

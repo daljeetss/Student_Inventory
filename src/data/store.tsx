@@ -14,8 +14,6 @@ import {
   emptyAppData,
 } from '@/data/types';
 
-const STORAGE_KEY = 'tutoring_app_data_v1';
-
 /** A session occurrence ready to display/mark attendance for — either a
  * persisted SessionRecord, or a "virtual" one computed from a group's
  * weekly schedule that hasn't been touched yet. */
@@ -68,65 +66,97 @@ export interface BillingRow {
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
+/** Parses a resource's stored JSON, tolerating a missing/corrupt value by
+ * falling back to an empty list for just that one resource -- a problem
+ * with one file should never take the others down with it. */
+function parseResourceArray<T>(raw: string | null): T[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(emptyAppData);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
-      const raw = await getItem(STORAGE_KEY);
-      if (raw) {
-        try {
-          setData({ ...emptyAppData, ...JSON.parse(raw) });
-        } catch {
-          setData(emptyAppData);
-        }
-      }
+      // Five independent resources -- see server/serve.js and DESIGN.md.
+      // "sessions" in memory is attendance + makeup combined (convenient
+      // for the calendar/billing logic below); persisting splits them
+      // back apart by `isMakeup`.
+      const [studentsRaw, classesRaw, attendanceRaw, makeupRaw, paymentsRaw] = await Promise.all([
+        getItem('students'),
+        getItem('classes'),
+        getItem('attendance'),
+        getItem('makeup'),
+        getItem('payments'),
+      ]);
+      setData({
+        students: parseResourceArray<Student>(studentsRaw),
+        groups: parseResourceArray<ClassGroup>(classesRaw),
+        sessions: [...parseResourceArray<SessionRecord>(attendanceRaw), ...parseResourceArray<SessionRecord>(makeupRaw)],
+        payments: parseResourceArray<Payment>(paymentsRaw),
+      });
       setLoading(false);
     })();
   }, []);
 
-  const persist = useCallback((next: AppData) => {
-    setData(next);
-    setItem(STORAGE_KEY, JSON.stringify(next));
+  const persistStudents = useCallback((students: Student[]) => {
+    setData((d) => ({ ...d, students }));
+    setItem('students', JSON.stringify(students));
+  }, []);
+
+  const persistGroups = useCallback((groups: ClassGroup[]) => {
+    setData((d) => ({ ...d, groups }));
+    setItem('classes', JSON.stringify(groups));
+  }, []);
+
+  const persistSessions = useCallback((sessions: SessionRecord[]) => {
+    setData((d) => ({ ...d, sessions }));
+    setItem('attendance', JSON.stringify(sessions.filter((s) => !s.isMakeup)));
+    setItem('makeup', JSON.stringify(sessions.filter((s) => s.isMakeup)));
+  }, []);
+
+  const persistPayments = useCallback((payments: Payment[]) => {
+    setData((d) => ({ ...d, payments }));
+    setItem('payments', JSON.stringify(payments));
   }, []);
 
   const addStudent = useCallback<AppDataContextValue['addStudent']>(
     (input) => {
       const student: Student = { ...input, id: makeId('stu'), createdAt: new Date().toISOString() };
-      persist({ ...data, students: [...data.students, student] });
+      persistStudents([...data.students, student]);
       return student;
     },
-    [data, persist],
+    [data.students, persistStudents],
   );
 
   const updateStudent = useCallback<AppDataContextValue['updateStudent']>(
     (id, patch) => {
-      persist({
-        ...data,
-        students: data.students.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-      });
+      persistStudents(data.students.map((s) => (s.id === id ? { ...s, ...patch } : s)));
     },
-    [data, persist],
+    [data.students, persistStudents],
   );
 
   const addGroup = useCallback<AppDataContextValue['addGroup']>(
     (input) => {
       const group: ClassGroup = { ...input, id: makeId('grp'), createdAt: new Date().toISOString() };
-      persist({ ...data, groups: [...data.groups, group] });
+      persistGroups([...data.groups, group]);
       return group;
     },
-    [data, persist],
+    [data.groups, persistGroups],
   );
 
   const updateGroup = useCallback<AppDataContextValue['updateGroup']>(
     (id, patch) => {
-      persist({
-        ...data,
-        groups: data.groups.map((g) => (g.id === id ? { ...g, ...patch } : g)),
-      });
+      persistGroups(data.groups.map((g) => (g.id === id ? { ...g, ...patch } : g)));
     },
-    [data, persist],
+    [data.groups, persistGroups],
   );
 
   const getOccurrencesForDate = useCallback<AppDataContextValue['getOccurrencesForDate']>(
@@ -203,10 +233,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         existingIndex >= 0
           ? data.sessions.map((s, i) => (i === existingIndex ? { ...s, attendance } : s))
           : [...data.sessions, record];
-      persist({ ...data, sessions: nextSessions });
+      persistSessions(nextSessions);
       return record;
     },
-    [data, persist],
+    [data.sessions, persistSessions],
   );
 
   const scheduleMakeup = useCallback<AppDataContextValue['scheduleMakeup']>(
@@ -223,10 +253,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         attendance: {},
         createdAt: new Date().toISOString(),
       };
-      persist({ ...data, sessions: [...data.sessions, record] });
+      persistSessions([...data.sessions, record]);
       return record;
     },
-    [data, persist],
+    [data.sessions, persistSessions],
   );
 
   const needsMakeup = useCallback<AppDataContextValue['needsMakeup']>(
@@ -236,7 +266,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       );
       return !alreadyScheduled;
     },
-    [data],
+    [data.sessions],
   );
 
   const getMonthlyBilling = useCallback<AppDataContextValue['getMonthlyBilling']>(
@@ -307,9 +337,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           ? { ...p, amountPaid, status, datePaid: status === 'unpaid' ? undefined : new Date().toISOString() }
           : p,
       );
-      persist({ ...data, payments: next });
+      persistPayments(next);
     },
-    [data, persist, resolvePayment],
+    [persistPayments, resolvePayment],
   );
 
   const markMessageSent = useCallback<AppDataContextValue['markMessageSent']>(
@@ -319,9 +349,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       const next = resolved.payments.map((p) =>
         p.id === paymentId ? { ...p, messageSentAt: new Date().toISOString() } : p,
       );
-      persist({ ...data, payments: next });
+      persistPayments(next);
     },
-    [data, persist, resolvePayment],
+    [persistPayments, resolvePayment],
   );
 
   const value = useMemo<AppDataContextValue>(
