@@ -49,6 +49,11 @@ interface AppDataContextValue {
     date: string;
     startTime: string;
     durationMinutes: number;
+    /** Set when the makeup is "join this other existing class's slot as a
+     * guest" rather than a fully custom one-off time -- purely for
+     * display (so the occurrence card shows that class's name); it does
+     * not add the student to that class's own roster or attendance. */
+    intoGroupId?: string;
   }) => SessionRecord;
   needsMakeup: (recordId: string, studentId: string) => boolean;
 
@@ -240,13 +245,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const scheduleMakeup = useCallback<AppDataContextValue['scheduleMakeup']>(
-    ({ forRecordId, studentId, date, startTime, durationMinutes }) => {
+    ({ forRecordId, studentId, date, startTime, durationMinutes, intoGroupId }) => {
       const record: SessionRecord = {
         id: makeId('sess'),
         date,
         startTime,
         durationMinutes,
-        groupId: null,
+        groupId: intoGroupId ?? null,
         isMakeup: true,
         makeupForRecordId: forRecordId,
         studentIds: [studentId],

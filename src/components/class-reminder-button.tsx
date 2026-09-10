@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { ChipSelect } from '@/components/ui/chip-select';
 import { TextField } from '@/components/ui/text-field';
 import { Student } from '@/data/types';
 import { openWhatsAppMessage } from '@/data/whatsapp';
+import { useTheme } from '@/hooks/use-theme';
 
 interface ClassReminderButtonProps {
   students: Student[];
@@ -16,24 +17,28 @@ interface ClassReminderButtonProps {
   label?: string;
 }
 
-/** A "Remind via WhatsApp" trigger that expands in place: pick which
- * student's parent to message (only shown when there's more than one --
- * a group class), edit the pre-filled reminder text, then send. Used from
- * both the Today tab (about a specific date) and the Classes tab (about a
- * recurring weekly slot in general) -- each passes its own `buildMessage`. */
+/** A "Remind via WhatsApp" trigger that expands in place into one editable
+ * message per student in the class, all at once -- one click gets every
+ * parent's reminder ready to go, each with its own Send button, instead of
+ * having to reopen this panel and re-pick a student one at a time. Used
+ * from both the Today tab (about a specific date) and the Classes tab
+ * (about a recurring weekly slot in general) -- each passes its own
+ * `buildMessage`. */
 export function ClassReminderButton({ students, buildMessage, label = 'Remind via WhatsApp' }: ClassReminderButtonProps) {
+  const theme = useTheme();
   const [open, setOpen] = useState(false);
-  const [studentId, setStudentId] = useState(students[0]?.id ?? '');
-  const [message, setMessage] = useState('');
-
-  const student = students.find((s) => s.id === studentId) ?? students[0];
+  const [messages, setMessages] = useState<Record<string, string>>({});
+  const [sentIds, setSentIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    if (open && student) setMessage(buildMessage(student));
-    // Only reset the draft when the panel opens or the selected student
-    // changes -- not on every keystroke, and not while it's closed.
+    if (!open) return;
+    const initial: Record<string, string> = {};
+    for (const student of students) initial[student.id] = buildMessage(student);
+    setMessages(initial);
+    setSentIds(new Set());
+    // Only recompute drafts when the panel opens, not on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, student?.id]);
+  }, [open]);
 
   if (students.length === 0) return null;
 
@@ -41,35 +46,49 @@ export function ClassReminderButton({ students, buildMessage, label = 'Remind vi
     return <Button title={label} variant="ghost" onPress={() => setOpen(true)} />;
   }
 
+  const send = async (student: Student) => {
+    await openWhatsAppMessage(student.parentPhone, messages[student.id] ?? '');
+    setSentIds((prev) => new Set(prev).add(student.id));
+  };
+
   return (
     <Card>
-      <ThemedText type="smallBold">Send a reminder</ThemedText>
-      {students.length > 1 && (
-        <ChipSelect
-          options={students.map((s) => ({ value: s.id, label: s.name }))}
-          value={student ? [student.id] : []}
-          onChange={(v) => setStudentId(v[0])}
-        />
-      )}
-      {student && (
-        <>
-          <TextField label={`Message to ${student.parentName}`} value={message} onChangeText={setMessage} multiline />
-          <View style={{ flexDirection: 'row', gap: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button title="Cancel" variant="ghost" onPress={() => setOpen(false)} />
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <ThemedText type="smallBold">
+          {students.length > 1 ? 'Send reminders' : 'Send a reminder'}
+        </ThemedText>
+        <Pressable onPress={() => setOpen(false)} hitSlop={8}>
+          <ThemedText type="small" themeColor="primary">
+            Close
+          </ThemedText>
+        </Pressable>
+      </View>
+
+      {students.map((student, i) => {
+        const sent = sentIds.has(student.id);
+        return (
+          <View
+            key={student.id}
+            style={{
+              gap: 8,
+              paddingTop: i > 0 ? 12 : 0,
+              borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0,
+              borderTopColor: theme.border,
+            }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <ThemedText type="smallBold">{student.name}</ThemedText>
+              {sent && <Badge label="Sent" tone="primary" />}
             </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Send via WhatsApp"
-                onPress={async () => {
-                  await openWhatsAppMessage(student.parentPhone, message);
-                  setOpen(false);
-                }}
-              />
-            </View>
+            <TextField
+              label={`Message to ${student.parentName}`}
+              value={messages[student.id] ?? ''}
+              onChangeText={(text) => setMessages((m) => ({ ...m, [student.id]: text }))}
+              multiline
+            />
+            <Button title={sent ? 'Send Again' : 'Send via WhatsApp'} variant={sent ? 'secondary' : 'primary'} onPress={() => send(student)} />
           </View>
-        </>
-      )}
+        );
+      })}
     </Card>
   );
 }

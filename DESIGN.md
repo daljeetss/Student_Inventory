@@ -187,10 +187,25 @@ becomes a real, persisted `SessionRecord` (same deterministic id:
 look at it before or after it's saved).
 
 A missed session can spawn a **makeup**: a one-off `SessionRecord` with
-`groupId: null`, `isMakeup: true`, and `makeupForRecordId` pointing back at
-the session that was missed. It's billed exactly like any other session —
-billing doesn't distinguish makeups from regular attendance, it just counts
-every `SessionRecord` in the month where that student's attendance is
+`isMakeup: true` and `makeupForRecordId` pointing back at the session that
+was missed, built by [`MakeupForm`](./src/components/makeup-form.tsx) one
+of two ways:
+- **Join an existing class's slot** — pick one of the other recurring
+  classes and (if it meets more than once a week) which weekly time; the
+  form computes the soonest matching date on/after the day after the
+  missed session (`nextOccurrenceOnOrAfter` in
+  [`src/data/date.ts`](./src/data/date.ts)), with a "use the week after
+  instead" button to push it out further. This sets `groupId` to that
+  *other* class's id — purely for display (so the occurrence card reads
+  e.g. "Tuesday Group (makeup)" and shows up alongside that class's own
+  card on that date) — it does **not** add the student to that class's
+  roster or affect its own attendance record.
+- **Custom date/time** — `groupId: null`, a freely typed one-off time, for
+  anything that doesn't match an existing slot.
+
+Either way it's billed exactly like any other session — billing doesn't
+distinguish makeups from regular attendance, it just counts every
+`SessionRecord` in the month where that student's attendance is
 `"present"`.
 
 ### Billing: why the Payment id is deterministic
@@ -219,3 +234,40 @@ message pre-filled (`https://wa.me/<phone>?text=<message>`) and opens it.
 The parent's phone must be a valid WhatsApp number; nothing is sent
 automatically, so there's no account, approval process, or per-message
 cost involved — the person using the app still taps Send themselves.
+
+## Testing
+
+`npm test` (see [README.md](./README.md#running-the-tests)) runs two Jest
+projects, configured in `package.json`'s `"jest"` field:
+
+- **`app`** (`src/data/__tests__/`, `jest-expo` preset) — the business
+  logic: date math, WhatsApp message builders, and the biggest one,
+  `store.test.tsx`, which exercises the real `AppDataProvider`/`useAppData`
+  hook end-to-end via `@testing-library/react-native`'s `renderHook`
+  (`src/data/storage.ts` is mocked with an in-memory stand-in — reset
+  between every test — so nothing touches the network or the filesystem).
+  This is where the trickiest logic lives: virtual-vs-persisted session
+  occurrences, makeup linking + `needsMakeup`, monthly billing math, and a
+  standing regression test that the not-yet-saved Payment id stays
+  deterministic across repeated calls (see "why the Payment id is
+  deterministic" above — this is the exact bug that test would have caught).
+- **`server`** (`server/__tests__/`, plain Node) — spawns the real
+  `server/serve.js` as a subprocess against a throwaway `TUTORING_DATA_DIR`
+  and a random port, then drives it over real HTTP: token auth (header,
+  query param, cookie, wrong token), every `/api/<resource>` endpoint
+  (empty-start, shape validation, round-tripping, cross-resource
+  isolation), the automatic-backup-before-write behavior, and the
+  cache-control headers on `index.html` vs. hashed assets vs. the API.
+  Every test file that touches data uses `TUTORING_DATA_DIR` (or the
+  mocked storage module, for the `app` project) — **never** `production/`.
+  This is a direct response to the incident where real data got
+  overwritten by hand-testing against the live file: nothing here can ever
+  touch real user data, by construction, not by discipline.
+
+What's *not* covered: the screens themselves (`src/app/**`) aren't
+rendered/tested directly — the business logic they call is covered via
+`store.test.tsx` instead, which catches the same class of bug (the
+Payment-id regression above was a logic bug, not a rendering one) with far
+less setup than full screen tests would need. Add screen-level tests if a
+future bug turns out to be in the rendering/wiring layer specifically
+rather than the logic underneath it.

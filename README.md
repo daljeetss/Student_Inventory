@@ -77,12 +77,21 @@ while using the app.
   in it, and what day/time it meets. The **Today** tab automatically shows
   what's scheduled for any given day based on this.
 - **Today** — tap a class to mark each student present/absent. If someone's
-  absent, you can immediately schedule a one-off makeup session (any date,
-  time, or class type) linked back to the missed class. Each class also has
+  absent, you can immediately schedule a makeup two ways: **join an
+  existing class's weekly slot** as a one-time guest (pick the class, pick
+  which day/time if it meets more than once a week, and it suggests the
+  soonest matching date — with a "use the week after instead" option if
+  that one doesn't work), or a fully **custom one-off date/time** for
+  anything that doesn't fit an existing slot. Either way it's linked back
+  to the missed class, and shows up on the makeup date as its own card
+  (e.g. "Tuesday Group (makeup)") alongside that class's regular roster.
+  Each class also has
   a **Remind via WhatsApp** button for an on-demand "you have class..."
-  nudge — pick which student (for a group class), edit the pre-filled
-  message, then send. The same button is on the **Classes** tab too, for
-  reminding about a recurring class in general rather than one specific day.
+  nudge — one tap shows every student in the class with their own editable,
+  pre-filled message and its own Send button, so a group class's parents
+  can each be messaged in a couple of taps instead of one at a time. The
+  same button is on the **Classes** tab too, for reminding about a
+  recurring class in general rather than one specific day.
 - **Billing** — pick a month; it totals each student's attended sessions
   (regular + makeup) × their rate. Tap **Send via WhatsApp** to open a
   pre-filled reminder message to the parent — you just hit send. Mark
@@ -116,6 +125,24 @@ not just at home, the next step is either:
 
 Ask your assistant to set either of these up when you're ready.
 
+## Running the tests
+
+```
+npm test
+```
+
+This runs the whole automated test suite — the business logic (billing math,
+attendance/makeup scheduling, occurrence generation) and the server (auth,
+each data endpoint, automatic backups, caching) — and prints a pass/fail
+summary. It builds the web app first automatically, so it always tests the
+current code. Nothing it does touches `production/` — it always runs
+against a fresh, throwaway data folder that gets deleted afterward.
+
+Run this after any code change, before restarting `npm run serve`, to catch
+a broken feature before your wife does. `npm run test:watch` re-runs
+automatically as you edit, for active development. See
+[DESIGN.md](./DESIGN.md#testing) for what's covered and how it's organized.
+
 ## Project structure
 
 ```
@@ -133,8 +160,10 @@ src/
                   available, else falls back to on-device storage
     whatsapp.ts   builds the due-amount/reminder messages + wa.me links
     date.ts       date/time formatting helpers
+    __tests__/    unit tests for the above (npm test)
 
 server/           the "npm run serve" home-screen-app server (see DESIGN.md)
+  __tests__/      integration tests for serve.js (npm test)
   serve.js        static file server + token auth + /api/<resource>
   icons/          generated app icons (192/512/apple-touch)
   access-token.txt   generated at runtime, not committed

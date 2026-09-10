@@ -44,6 +44,12 @@ export function addDays(d: Date, days: number): Date {
   return copy;
 }
 
+/** The next date on or after `from` that falls on `dayOfWeek` (0=Sunday). */
+export function nextOccurrenceOnOrAfter(from: Date, dayOfWeek: number): Date {
+  const diff = (dayOfWeek - from.getDay() + 7) % 7;
+  return addDays(from, diff);
+}
+
 export function startOfWeek(d: Date): Date {
   const copy = new Date(d);
   copy.setHours(0, 0, 0, 0);
