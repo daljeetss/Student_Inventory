@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { Pressable, View } from 'react-native';
 
-import { ClassReminderButton } from '@/components/class-reminder-button';
+import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -62,9 +62,10 @@ export default function ClassesScreen() {
                 )}
                 {!item.active && <Badge label="Inactive" tone="textSecondary" />}
               </Pressable>
-              <ClassReminderButton
+              <WhatsAppSendButton
                 students={students}
                 buildMessage={(student) => buildClassReminderMessage(student.name, student.parentName, scheduleWhenLabel(item))}
+                label="Remind via WhatsApp"
               />
             </Card>
           );

@@ -7,10 +7,11 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
+import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
 import { addMonths, monthKeyLabel, toMonthKey } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { PaymentStatus } from '@/data/types';
-import { buildDueMessage, openWhatsAppMessage } from '@/data/whatsapp';
+import { buildDueMessage } from '@/data/whatsapp';
 
 const STATUS_TONE: Record<PaymentStatus, 'primary' | 'warning' | 'danger'> = {
   paid: 'primary',
@@ -32,13 +33,6 @@ export default function BillingScreen() {
 
   const rows = getMonthlyBilling(monthKey).sort((a, b) => a.student.name.localeCompare(b.student.name));
   const totalDue = rows.reduce((sum, r) => sum + (r.payment.status === 'paid' ? 0 : r.amountDue - r.payment.amountPaid), 0);
-
-  const sendWhatsApp = async (row: (typeof rows)[number]) => {
-    const message = buildDueMessage(row.student, monthKey, row.sessionsAttended, row.amountDue);
-    const ok = await openWhatsAppMessage(row.student.parentPhone, message);
-    if (ok) markMessageSent(row.payment.id);
-    else Alert.alert('Could not open WhatsApp', 'Check that WhatsApp is installed and the phone number is correct.');
-  };
 
   const markPaidInFull = (row: (typeof rows)[number]) => {
     recordPayment(row.payment.id, row.amountDue, 'paid');
@@ -110,31 +104,35 @@ export default function BillingScreen() {
                 Nothing due this month — no reminder or payment actions needed.
               </ThemedText>
             ) : (
-              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-                <View style={{ flex: 1, minWidth: 140 }}>
-                  <Button title="Send via WhatsApp" onPress={() => sendWhatsApp(row)} />
-                </View>
-                {row.payment.status !== 'paid' && (
+              <>
+                <WhatsAppSendButton
+                  students={[row.student]}
+                  buildMessage={() => buildDueMessage(row.student, monthKey, row.sessionsAttended, row.amountDue)}
+                  onSent={() => markMessageSent(row.payment.id)}
+                />
+                <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                  {row.payment.status !== 'paid' && (
+                    <View style={{ flex: 1, minWidth: 140 }}>
+                      <Button title="Mark Paid in Full" variant="secondary" onPress={() => markPaidInFull(row)} />
+                    </View>
+                  )}
+                  {row.payment.status !== 'unpaid' && (
+                    <View style={{ flex: 1, minWidth: 140 }}>
+                      <Button title="Mark Unpaid" variant="ghost" onPress={() => markUnpaid(row)} />
+                    </View>
+                  )}
                   <View style={{ flex: 1, minWidth: 140 }}>
-                    <Button title="Mark Paid in Full" variant="secondary" onPress={() => markPaidInFull(row)} />
+                    <Button
+                      title="Record Partial Payment"
+                      variant="ghost"
+                      onPress={() => {
+                        setPartialFor(row.student.id);
+                        setPartialAmount('');
+                      }}
+                    />
                   </View>
-                )}
-                {row.payment.status !== 'unpaid' && (
-                  <View style={{ flex: 1, minWidth: 140 }}>
-                    <Button title="Mark Unpaid" variant="ghost" onPress={() => markUnpaid(row)} />
-                  </View>
-                )}
-                <View style={{ flex: 1, minWidth: 140 }}>
-                  <Button
-                    title="Record Partial Payment"
-                    variant="ghost"
-                    onPress={() => {
-                      setPartialFor(row.student.id);
-                      setPartialAmount('');
-                    }}
-                  />
                 </View>
-              </View>
+              </>
             )}
 
             {partialFor === row.student.id && (

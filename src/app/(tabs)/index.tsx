@@ -2,7 +2,7 @@ import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 
-import { ClassReminderButton } from '@/components/class-reminder-button';
+import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -97,7 +97,7 @@ export default function TodayScreen() {
                 </View>
               </Pressable>
               {!isPastDate && (
-                <ClassReminderButton students={students} buildMessage={(student) => reminderMessage(occ, student)} />
+                <WhatsAppSendButton students={students} buildMessage={(student) => reminderMessage(occ, student)} label="Remind via WhatsApp" />
               )}
             </Card>
           );

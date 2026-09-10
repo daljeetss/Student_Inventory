@@ -93,9 +93,11 @@ while using the app.
   same button is on the **Classes** tab too, for reminding about a
   recurring class in general rather than one specific day.
 - **Billing** — pick a month; it totals each student's attended sessions
-  (regular + makeup) × their rate. Tap **Send via WhatsApp** to open a
-  pre-filled reminder message to the parent — you just hit send. Mark
-  payments as paid in full, partial, or unpaid as money comes in.
+  (regular + makeup) × their rate. Tap **Send via WhatsApp** to see the
+  pre-filled reminder message before it goes anywhere — edit it if you
+  want, then send when you're ready. Mark payments as paid in full,
+  partial, or unpaid as money comes in. A student with nothing due that
+  month shows no reminder/payment actions at all.
 
 **Where the data lives depends on how you're running it:**
 - Via `npm run serve` (recommended, see below) — all data lives in the

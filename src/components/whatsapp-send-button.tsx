@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
@@ -10,21 +10,23 @@ import { Student } from '@/data/types';
 import { openWhatsAppMessage } from '@/data/whatsapp';
 import { useTheme } from '@/hooks/use-theme';
 
-interface ClassReminderButtonProps {
+interface WhatsAppSendButtonProps {
   students: Student[];
   /** Builds the default (editable) message for a given student. */
   buildMessage: (student: Student) => string;
   label?: string;
+  /** Called after a message is actually sent for a student (e.g. to record
+   * a "reminder sent" timestamp) -- not called if opening WhatsApp fails. */
+  onSent?: (student: Student) => void;
 }
 
-/** A "Remind via WhatsApp" trigger that expands in place into one editable
- * message per student in the class, all at once -- one click gets every
- * parent's reminder ready to go, each with its own Send button, instead of
- * having to reopen this panel and re-pick a student one at a time. Used
- * from both the Today tab (about a specific date) and the Classes tab
- * (about a recurring weekly slot in general) -- each passes its own
- * `buildMessage`. */
-export function ClassReminderButton({ students, buildMessage, label = 'Remind via WhatsApp' }: ClassReminderButtonProps) {
+/** A "Send via WhatsApp" trigger that expands in place into one editable
+ * message per student, all at once -- one click gets every parent's
+ * message ready to go, each with its own Send button, instead of having
+ * to reopen this panel and re-pick a student one at a time. Used for the
+ * on-demand class reminders (Today/Classes tabs) and the monthly billing
+ * reminder (Billing tab) -- each caller passes its own `buildMessage`. */
+export function WhatsAppSendButton({ students, buildMessage, label = 'Send via WhatsApp', onSent }: WhatsAppSendButtonProps) {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Record<string, string>>({});
@@ -47,15 +49,20 @@ export function ClassReminderButton({ students, buildMessage, label = 'Remind vi
   }
 
   const send = async (student: Student) => {
-    await openWhatsAppMessage(student.parentPhone, messages[student.id] ?? '');
+    const ok = await openWhatsAppMessage(student.parentPhone, messages[student.id] ?? '');
+    if (!ok) {
+      Alert.alert('Could not open WhatsApp', 'Check that WhatsApp is installed and the phone number is correct.');
+      return;
+    }
     setSentIds((prev) => new Set(prev).add(student.id));
+    onSent?.(student);
   };
 
   return (
     <Card>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
         <ThemedText type="smallBold">
-          {students.length > 1 ? 'Send reminders' : 'Send a reminder'}
+          {students.length > 1 ? 'Send messages' : 'Preview message'}
         </ThemedText>
         <Pressable onPress={() => setOpen(false)} hitSlop={8}>
           <ThemedText type="small" themeColor="primary">
