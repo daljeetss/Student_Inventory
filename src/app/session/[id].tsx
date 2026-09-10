@@ -11,6 +11,18 @@ import { formatDateLabel, formatTime, fromDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { AttendanceStatus } from '@/data/types';
 
+/** Key-order-independent comparison -- draft and a persisted record's
+ * attendance map can list the same entries in different orders. */
+function attendanceEqual(
+  a: Record<string, AttendanceStatus | undefined>,
+  b: Record<string, AttendanceStatus | undefined>,
+): boolean {
+  const keysA = Object.keys(a).filter((k) => a[k]);
+  const keysB = Object.keys(b).filter((k) => b[k]);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((k) => a[k] === b[k]);
+}
+
 export default function SessionScreen() {
   const { id, date } = useLocalSearchParams<{ id: string; date: string }>();
   const router = useRouter();
@@ -49,6 +61,11 @@ export default function SessionScreen() {
       delete next[sid];
       return next;
     });
+
+  // Reflects whether what's on screen matches what's actually persisted --
+  // a fresh, never-saved occurrence always counts as "not saved yet" even
+  // if nothing's marked, so this isn't just draft-vs-attendance equality.
+  const isSaved = occurrence.persisted && attendanceEqual(draft, occurrence.attendance);
 
   const save = () => {
     saveAttendance(occurrence, draft as Record<string, AttendanceStatus>);
@@ -104,7 +121,7 @@ export default function SessionScreen() {
         </Card>
       ))}
 
-      <Button title="Save Attendance" onPress={save} />
+      <Button title={isSaved ? '✓ Saved' : 'Save Attendance'} variant={isSaved ? 'secondary' : 'primary'} disabled={isSaved} onPress={save} />
 
       {makeupFor && (
         <MakeupForm
