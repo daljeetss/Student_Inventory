@@ -20,7 +20,11 @@ export default function TodayScreen() {
 
   const occurrences = useMemo(() => getOccurrencesForDate(selectedDate), [getOccurrencesForDate, selectedDate]);
   const dateKey = toDateKey(selectedDate);
-  const isToday = dateKey === toDateKey(new Date());
+  const todayKey = toDateKey(new Date());
+  const isToday = dateKey === todayKey;
+  // Reminding about a class that's already happened doesn't make sense --
+  // only offer it for today (it may not have started yet) or a future date.
+  const isPastDate = dateKey < todayKey;
 
   const studentName = (id: string) => data.students.find((s) => s.id === id)?.name ?? 'Unknown';
 
@@ -33,7 +37,7 @@ export default function TodayScreen() {
   };
 
   const reminderMessage = (occ: (typeof occurrences)[number], student: Student) => {
-    const whenLabel = occ.date === toDateKey(new Date()) ? `today at ${formatTime(occ.startTime)}` : `on ${formatDateLabel(occ.date)} at ${formatTime(occ.startTime)}`;
+    const whenLabel = occ.date === todayKey ? `today at ${formatTime(occ.startTime)}` : `on ${formatDateLabel(occ.date)} at ${formatTime(occ.startTime)}`;
     return buildClassReminderMessage(student.name, student.parentName, whenLabel);
   };
 
@@ -92,7 +96,9 @@ export default function TodayScreen() {
                   <Badge label={summary.label} tone={summary.tone} />
                 </View>
               </Pressable>
-              <ClassReminderButton students={students} buildMessage={(student) => reminderMessage(occ, student)} />
+              {!isPastDate && (
+                <ClassReminderButton students={students} buildMessage={(student) => reminderMessage(occ, student)} />
+              )}
             </Card>
           );
         })}
