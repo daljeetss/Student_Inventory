@@ -221,6 +221,18 @@ becomes a real, persisted `SessionRecord` (same deterministic id:
 `<groupId>_<date>_<startTime>`, so it's the same occurrence whether you
 look at it before or after it's saved).
 
+`SessionRecord.studentIds` is only ever the persisted attendance-map keys,
+not the source of truth for who's *in* the session — a regular (non-makeup)
+record's roster is always resolved from its group's *current*
+`studentIds` at render time, not a snapshot frozen at save time. This
+matters: if a class's roster is edited later (e.g. correcting a 1-on-1
+that should've been a group from the start), that correction shows up on
+every date already marked, not just future ones — a newly added student
+just shows up "Not marked" on past dates too, since there's no per-student
+join date tracked. (A makeup's `studentIds` is the one exception — it's an
+intentional one-off list, e.g. just the one student joining another
+class's slot as a guest, and is never resolved from a group.)
+
 A missed session can spawn a **makeup**: a one-off `SessionRecord` with
 `isMakeup: true` and `makeupForRecordId` pointing back at the session that
 was missed, built by [`MakeupForm`](./src/components/makeup-form.tsx) one

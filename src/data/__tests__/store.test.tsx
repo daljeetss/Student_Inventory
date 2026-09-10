@@ -187,6 +187,65 @@ describe('AppDataProvider / useAppData', () => {
     expect(after.persisted).toBe(true);
   });
 
+  // Regression test: a class created as 1-on-1, attendance already marked
+  // for a student, then corrected to a group with a second student added --
+  // the already-persisted occurrence used to keep showing only the
+  // original roster (a frozen snapshot from when it was saved), so the
+  // newly added student silently never appeared on that date.
+  it('editing a group\'s roster updates an already-persisted occurrence, not just future ones', async () => {
+    const { result } = await setup();
+
+    let aarush;
+    await act(async () => {
+      aarush = result.current.addStudent({
+        name: 'Aarush',
+        grade: '4',
+        parentName: 'ParentA',
+        parentPhone: '15551110001',
+        ratePerSession: 30,
+        active: true,
+      });
+    });
+    let group;
+    await act(async () => {
+      group = result.current.addGroup({
+        name: 'Thursday_4-5',
+        type: 'one-on-one',
+        studentIds: [aarush!.id],
+        // 2026-09-10 is a Thursday (dayOfWeek 4).
+        schedule: [{ dayOfWeek: 4, startTime: '16:00', durationMinutes: 60 }],
+        active: true,
+      });
+    });
+
+    const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 10))[0];
+    await act(async () => {
+      result.current.saveAttendance(occ, { [aarush!.id]: 'present' });
+    });
+
+    // The mistake is caught: it should've been a group with Pallavi too.
+    let pallavi;
+    await act(async () => {
+      pallavi = result.current.addStudent({
+        name: 'Pallavi',
+        grade: '4',
+        parentName: 'ParentP',
+        parentPhone: '15551110002',
+        ratePerSession: 30,
+        active: true,
+      });
+    });
+    await act(async () => {
+      result.current.updateGroup(group!.id, { type: 'group', studentIds: [aarush!.id, pallavi!.id] });
+    });
+
+    const corrected = result.current.getOccurrencesForDate(new Date(2026, 8, 10))[0];
+    expect(corrected.persisted).toBe(true);
+    expect(corrected.studentIds).toEqual(expect.arrayContaining([aarush!.id, pallavi!.id]));
+    expect(corrected.attendance[aarush!.id]).toBe('present'); // untouched
+    expect(corrected.attendance[pallavi!.id]).toBeUndefined(); // newly added, unmarked
+  });
+
   it('schedules a makeup linked back to the missed session, and needsMakeup reflects it', async () => {
     const { result } = await setup();
 

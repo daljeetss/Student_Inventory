@@ -105,31 +105,37 @@ export default function BillingScreen() {
               </ThemedText>
             )}
 
-            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-              <View style={{ flex: 1, minWidth: 140 }}>
-                <Button title="Send via WhatsApp" onPress={() => sendWhatsApp(row)} />
-              </View>
-              {row.payment.status !== 'paid' && (
+            {row.amountDue === 0 ? (
+              <ThemedText type="small" themeColor="textSecondary">
+                Nothing due this month — no reminder or payment actions needed.
+              </ThemedText>
+            ) : (
+              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
                 <View style={{ flex: 1, minWidth: 140 }}>
-                  <Button title="Mark Paid in Full" variant="secondary" onPress={() => markPaidInFull(row)} />
+                  <Button title="Send via WhatsApp" onPress={() => sendWhatsApp(row)} />
                 </View>
-              )}
-              {row.payment.status !== 'unpaid' && (
+                {row.payment.status !== 'paid' && (
+                  <View style={{ flex: 1, minWidth: 140 }}>
+                    <Button title="Mark Paid in Full" variant="secondary" onPress={() => markPaidInFull(row)} />
+                  </View>
+                )}
+                {row.payment.status !== 'unpaid' && (
+                  <View style={{ flex: 1, minWidth: 140 }}>
+                    <Button title="Mark Unpaid" variant="ghost" onPress={() => markUnpaid(row)} />
+                  </View>
+                )}
                 <View style={{ flex: 1, minWidth: 140 }}>
-                  <Button title="Mark Unpaid" variant="ghost" onPress={() => markUnpaid(row)} />
+                  <Button
+                    title="Record Partial Payment"
+                    variant="ghost"
+                    onPress={() => {
+                      setPartialFor(row.student.id);
+                      setPartialAmount('');
+                    }}
+                  />
                 </View>
-              )}
-              <View style={{ flex: 1, minWidth: 140 }}>
-                <Button
-                  title="Record Partial Payment"
-                  variant="ghost"
-                  onPress={() => {
-                    setPartialFor(row.student.id);
-                    setPartialAmount('');
-                  }}
-                />
               </View>
-            </View>
+            )}
 
             {partialFor === row.student.id && (
               <View style={{ gap: 8 }}>

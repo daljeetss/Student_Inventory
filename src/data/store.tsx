@@ -198,6 +198,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       for (const record of data.sessions) {
         if (record.date !== dateKey) continue;
         const group = record.groupId ? data.groups.find((g) => g.id === record.groupId) : undefined;
+        // A regular (non-makeup) record's roster tracks the group's
+        // CURRENT membership, not whoever was in it the day attendance
+        // was saved -- otherwise editing a class's students (e.g. fixing
+        // a 1-on-1 that should've been a group from the start) wouldn't
+        // show up on any date already marked, only on future ones. A
+        // makeup's studentIds is an intentional one-off list instead
+        // (e.g. just the one student joining another class as a guest),
+        // so it's left alone; same if the group itself was deleted.
+        const studentIds = !record.isMakeup && group ? group.studentIds : record.studentIds;
         occurrences.push({
           id: record.id,
           date: record.date,
@@ -207,7 +216,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           groupName: group ? group.name : record.isMakeup ? 'Makeup session' : 'Session',
           isMakeup: record.isMakeup,
           makeupForRecordId: record.makeupForRecordId,
-          studentIds: record.studentIds,
+          studentIds,
           attendance: record.attendance,
           persisted: true,
         });
