@@ -174,6 +174,41 @@ used for testing, ever** — point `server/serve.js` at a different folder
 via the `TUTORING_DATA_DIR` environment variable for anything experimental
 instead.
 
+**Off-machine backups.** `production/backups/` above is same-machine only
+— it protects against a bad write, not against this Mac itself failing.
+`server/backup.sh` (`npm run backup`) is the separate, off-machine answer:
+tars up the five current data files (not the on-disk `backups/` history —
+that's the same-machine net, this is the off-machine one), encrypts it with
+`openssl enc -aes-256-cbc -pbkdf2` using a passphrase typed interactively
+(never stored anywhere — openssl's own prompt, hidden input, typed twice),
+and writes the result to `~/Documents/TutoringTrackerBackups/`.
+
+Getting it into Google Drive is a real API upload, not just a synced
+folder: `server/gdrive-auth.js` (`npm run gdrive-auth`, one-time) runs a
+standard OAuth "installed app" flow — a tiny loopback HTTP server on
+`127.0.0.1:53682` as the redirect target, the user approves access in
+their own browser, and the resulting refresh token is saved to
+`server/gdrive-credentials.json` (gitignored — it grants real upload
+access). It deliberately requests the narrowest scope,
+`drive.file` — this app can only ever see/manage files it creates itself,
+never browse or read the rest of the user's Drive. `server/gdrive-upload.js`
+then uses that refresh token to mint a fresh access token per upload (they
+expire quickly; refresh tokens don't) and does a `multipart/related`
+POST to the Drive v3 upload endpoint with `parents: [FOLDER_ID]` set to
+the user's chosen folder (hardcoded — this is single-user, single-folder
+by design, not a general integration).
+
+`backup.sh` calls `gdrive-upload.js` automatically after every backup, but
+never depends on it: if credentials don't exist yet (`gdrive-auth` not run
+yet) or the upload fails for any reason, it falls back to `open`-ing the
+file's Finder location and the Drive folder in the browser so the user can
+drag it over manually — a failed/unset-up upload must never block a
+backup from being made. `server/restore.sh` (`npm run restore -- <file>`)
+reverses it — decrypts, then safety-copies
+the current `production/` to `production-before-restore-<timestamp>/`
+(gitignored) before replacing it, so a restore itself can never destroy
+data either.
+
 ### Session occurrences: virtual until touched
 
 `ClassGroup.schedule` describes a *recurring* weekly slot (e.g. "Tuesdays,

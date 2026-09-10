@@ -36,9 +36,15 @@ yarn-error.*
 # access token for the "npm run serve" home-screen-app server
 server/access-token.txt
 
+# Google Drive OAuth refresh token (npm run gdrive-auth) -- grants upload
+# access to your Drive backups folder; never commit this.
+server/gdrive-credentials.json
+
 # real user data -- one file per entity, plus automatic backups. Never
 # commit this; see DESIGN.md for why it's a separate top-level folder.
 /production/
+# restore.sh's safety copy of production/ from before a restore
+/production-before-restore-*/
 
 # pre-migration data (superseded by /production/, kept only as a paper
 # trail) -- same reason, never commit real user data.

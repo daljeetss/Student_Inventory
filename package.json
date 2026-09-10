@@ -49,7 +49,10 @@
     "serve": "npm run build:web && node server/serve.js",
     "pretest": "npm run build:web",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "backup": "bash server/backup.sh",
+    "restore": "bash server/restore.sh",
+    "gdrive-auth": "node server/gdrive-auth.js"
   },
   "jest": {
     "projects": [
