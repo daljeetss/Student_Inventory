@@ -3,13 +3,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { Alert, View } from 'react-native';
 
 import { MakeupForm, MakeupSelection } from '@/components/makeup-form';
+import { RescheduleForm } from '@/components/reschedule-form';
 import { ThemedText } from '@/components/themed-text';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
 import { formatDateLabel, formatTime, fromDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
-import { AttendanceStatus } from '@/data/types';
+import { AttendanceStatus, Student } from '@/data/types';
 
 /** Key-order-independent comparison -- draft and a persisted record's
  * attendance map can list the same entries in different orders. */
@@ -26,13 +27,14 @@ function attendanceEqual(
 export default function SessionScreen() {
   const { id, date } = useLocalSearchParams<{ id: string; date: string }>();
   const router = useRouter();
-  const { data, getOccurrencesForDate, saveAttendance, scheduleMakeup, needsMakeup } = useAppData();
+  const { data, getOccurrencesForDate, saveAttendance, scheduleMakeup, needsMakeup, rescheduleStudents } = useAppData();
 
   const occurrences = useMemo(() => getOccurrencesForDate(fromDateKey(date)), [getOccurrencesForDate, date]);
   const occurrence = occurrences.find((o) => o.id === id);
 
   const [draft, setDraft] = useState<Record<string, AttendanceStatus | undefined>>({});
   const [makeupFor, setMakeupFor] = useState<string | null>(null);
+  const [reschedulingOpen, setReschedulingOpen] = useState(false);
 
   useEffect(() => {
     if (occurrence) setDraft(occurrence.attendance);
@@ -83,11 +85,33 @@ export default function SessionScreen() {
     Alert.alert('Makeup scheduled', `${name} is scheduled for ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
   };
 
+  const confirmReschedule = (studentIds: string[], selection: MakeupSelection) => {
+    rescheduleStudents({ source: occurrence, studentIds, ...selection });
+    const names = studentIds.map(studentName).join(' and ');
+    setReschedulingOpen(false);
+    Alert.alert('Rescheduled', `${names} moved to ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
+  };
+
   return (
     <Screen>
       <ThemedText type="smallBold">
         {occurrence.groupName} · {formatDateLabel(occurrence.date)} · {formatTime(occurrence.startTime)}
       </ThemedText>
+
+      {!reschedulingOpen && occurrence.studentIds.length > 0 && (
+        <Button title="Reschedule Students" variant="ghost" onPress={() => setReschedulingOpen(true)} />
+      )}
+      {reschedulingOpen && (
+        <RescheduleForm
+          occurrenceDate={occurrence.date}
+          occurrenceDurationMinutes={occurrence.durationMinutes}
+          occurrenceGroupId={occurrence.groupId}
+          students={occurrence.studentIds.map((sid) => data.students.find((s) => s.id === sid)).filter((s): s is Student => !!s)}
+          groups={data.groups.filter((g) => g.active)}
+          onCancel={() => setReschedulingOpen(false)}
+          onConfirm={confirmReschedule}
+        />
+      )}
 
       {occurrence.studentIds.map((sid) => (
         <Card key={sid}>
@@ -125,7 +149,7 @@ export default function SessionScreen() {
 
       {makeupFor && (
         <MakeupForm
-          studentName={studentName(makeupFor)}
+          heading={`Schedule makeup for ${studentName(makeupFor)}`}
           missedDate={occurrence.date}
           missedDurationMinutes={occurrence.durationMinutes}
           groups={data.groups.filter((g) => g.active)}

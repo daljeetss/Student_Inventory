@@ -87,7 +87,7 @@ export default function TodayScreen() {
                   <View>
                     <ThemedText type="smallBold">
                       {formatTime(occ.startTime)} · {occ.groupName}
-                      {occ.isMakeup ? ' (makeup)' : ''}
+                      {occ.isMakeup ? ' (rescheduled)' : ''}
                     </ThemedText>
                     <ThemedText type="small" themeColor="textSecondary">
                       {occ.studentIds.map(studentName).join(', ')}

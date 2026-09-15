@@ -5,6 +5,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ChipSelect } from '@/components/ui/chip-select';
+import { DatePickerField } from '@/components/ui/date-picker-field';
 import { TextField } from '@/components/ui/text-field';
 import { addDays, DAY_NAMES_SHORT, formatDateLabel, formatTime, fromDateKey, nextOccurrenceOnOrAfter, toDateKey } from '@/data/date';
 import { ClassGroup } from '@/data/types';
@@ -18,27 +19,37 @@ export interface MakeupSelection {
 }
 
 interface MakeupFormProps {
-  studentName: string;
-  /** The missed session -- used to default the custom time and to make
+  /** Shown as the panel's title -- callers phrase this themselves, since
+   * "schedule makeup for X" doesn't fit every use of this form (e.g.
+   * proactively moving students, not compensating for an absence). */
+  heading: string;
+  /** The original session -- used to default the custom time and to make
    * sure a picked "existing class" slot lands after it, not before. */
   missedDate: string;
   missedDurationMinutes: number;
   /** Active classes offered as "join this class's slot instead" options. */
   groups: ClassGroup[];
+  /** Pre-selects this class in "existing" mode, and tags "custom" mode's
+   * result with it too, instead of leaving it groupless -- for moving
+   * students who are still fundamentally in this class, just to a
+   * different time. */
+  defaultGroupId?: string;
   onCancel: () => void;
   onConfirm: (selection: MakeupSelection) => void;
 }
 
 type Mode = 'existing' | 'custom';
 
-/** Lets the tutor schedule a makeup two ways: pick one of the existing
- * recurring classes' weekly slots to join as a one-time guest (the common
- * case -- "just put them in Tuesday's group"), or type a fully custom
- * one-off date/time for anything that doesn't match an existing slot. */
-export function MakeupForm({ studentName, missedDate, missedDurationMinutes, groups, onCancel, onConfirm }: MakeupFormProps) {
+/** Lets the tutor schedule a one-off session two ways: pick one of the
+ * existing recurring classes' weekly slots to join as a one-time guest
+ * (the common case -- "just put them in Tuesday's group"), or type a
+ * fully custom one-off date/time for anything that doesn't match an
+ * existing slot. Used both for makeups (compensating a missed session)
+ * and for proactively rescheduling students ahead of time. */
+export function MakeupForm({ heading, missedDate, missedDurationMinutes, groups, defaultGroupId, onCancel, onConfirm }: MakeupFormProps) {
   const [mode, setMode] = useState<Mode>(groups.length > 0 ? 'existing' : 'custom');
 
-  const [groupId, setGroupId] = useState(groups[0]?.id ?? '');
+  const [groupId, setGroupId] = useState(defaultGroupId && groups.some((g) => g.id === defaultGroupId) ? defaultGroupId : (groups[0]?.id ?? ''));
   const group = groups.find((g) => g.id === groupId) ?? groups[0];
   const [slotIndex, setSlotIndex] = useState(0);
   const slot = group?.schedule[slotIndex];
@@ -62,18 +73,19 @@ export function MakeupForm({ studentName, missedDate, missedDurationMinutes, gro
       onConfirm({ date: existingDateKey, startTime: slot.startTime, durationMinutes: slot.durationMinutes, intoGroupId: group.id });
       return;
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(customDate)) return Alert.alert('Invalid date', 'Use YYYY-MM-DD.');
+    if (!customDate) return Alert.alert('Pick a date', 'Tap the date field to choose one from the calendar.');
     if (!/^\d{1,2}:\d{2}$/.test(customTime)) return Alert.alert('Invalid time', 'Use 24h HH:mm.');
     onConfirm({
       date: customDate,
       startTime: customTime,
       durationMinutes: Number(customDuration) || missedDurationMinutes,
+      intoGroupId: defaultGroupId,
     });
   };
 
   return (
     <Card>
-      <ThemedText type="smallBold">Schedule makeup for {studentName}</ThemedText>
+      <ThemedText type="smallBold">{heading}</ThemedText>
 
       {groups.length > 0 && (
         <ChipSelect
@@ -135,7 +147,7 @@ export function MakeupForm({ studentName, missedDate, missedDurationMinutes, gro
         </>
       ) : (
         <>
-          <TextField label="Date (YYYY-MM-DD)" value={customDate} onChangeText={setCustomDate} />
+          <DatePickerField label="Date" value={customDate} onChange={setCustomDate} />
           <TextField label="Time (24h HH:mm)" value={customTime} onChangeText={setCustomTime} />
           <TextField label="Duration (min)" value={customDuration} onChangeText={setCustomDuration} keyboardType="number-pad" />
         </>

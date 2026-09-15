@@ -43,10 +43,21 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return { ...(token ? { 'X-Dashboard-Token': token } : {}), ...extra };
 }
 
+// Whether an /api/<resource> call has ever actually succeeded this
+// session. Used to tell "there's no server here" (dev mode via `expo
+// start --web`, which has no /api routes at all -- expected, silent
+// fallback to localStorage is correct) apart from "there IS a server and
+// this save didn't reach it" (a real failure worth telling the user
+// about, since it means this device's data isn't actually shared/durable
+// yet). Only ever flips one direction, on purpose -- once we know a
+// server is there, a later failure is a real problem, not a mode switch.
+let serverConfirmedReachable = false;
+
 async function apiGet(resource: string): Promise<{ ok: true; value: string } | { ok: false }> {
   try {
     const res = await fetch(`/api/${resource}`, { credentials: 'same-origin', headers: apiHeaders() });
     if (!res.ok) return { ok: false };
+    serverConfirmedReachable = true;
     return { ok: true, value: await res.text() };
   } catch {
     return { ok: false };
@@ -61,6 +72,7 @@ async function apiSet(resource: string, value: string): Promise<boolean> {
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: value,
     });
+    if (res.ok) serverConfirmedReachable = true;
     return res.ok;
   } catch {
     return false;
@@ -80,7 +92,13 @@ export async function getItem(key: string): Promise<string | null> {
   return AsyncStorage.getItem(key);
 }
 
-export async function setItem(key: string, value: string): Promise<void> {
+/** Returns false only when there's a real, known-reachable server that
+ * this particular write failed to reach -- never for the expected "no
+ * server in dev mode" case, where local-only storage is correct and
+ * unremarkable. Callers should treat `false` as worth surfacing to the
+ * user; a save that only landed in this device's local storage isn't
+ * actually shared with other devices yet. */
+export async function setItem(key: string, value: string): Promise<boolean> {
   if (Platform.OS === 'web') {
     // Write-through to localStorage too: keeps this device usable the
     // instant the server isn't reachable (e.g. a network blip), even
@@ -90,8 +108,9 @@ export async function setItem(key: string, value: string): Promise<void> {
     } catch {
       // ignore (e.g. private browsing quota errors)
     }
-    await apiSet(key, value);
-    return;
+    const ok = await apiSet(key, value);
+    return ok || !serverConfirmedReachable;
   }
   await AsyncStorage.setItem(key, value);
+  return true;
 }

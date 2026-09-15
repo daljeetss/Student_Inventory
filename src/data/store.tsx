@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 
 import { toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
@@ -27,6 +28,10 @@ export interface Occurrence {
   isMakeup: boolean;
   makeupForRecordId?: string;
   studentIds: string[];
+  /** See SessionRecord.rosterCustomized -- carried through so a later
+   * saveAttendance on this same occurrence doesn't lose the flag and
+   * cause the roster to snap back to the group's current membership. */
+  rosterCustomized: boolean;
   attendance: Record<string, AttendanceStatus>;
   persisted: boolean;
 }
@@ -56,6 +61,23 @@ interface AppDataContextValue {
     intoGroupId?: string;
   }) => SessionRecord;
   needsMakeup: (recordId: string, studentId: string) => boolean;
+
+  /** Proactively moves some (not necessarily all) students out of an
+   * upcoming occurrence to a one-off session elsewhere -- e.g. "2 of the
+   * 3 kids in tomorrow's group are doing it today instead, just this
+   * time." Unlike scheduleMakeup, this doesn't require anyone to have
+   * been marked absent first: it splits `source` into two records --
+   * `source`'s own date keeps only the students who AREN'T moving (so
+   * they don't show up twice), and a new one-off record is created for
+   * the moved students at the destination. Returns the new record. */
+  rescheduleStudents: (params: {
+    source: Occurrence;
+    studentIds: string[];
+    date: string;
+    startTime: string;
+    durationMinutes: number;
+    intoGroupId?: string;
+  }) => SessionRecord;
 
   getMonthlyBilling: (monthKey: string) => BillingRow[];
   recordPayment: (paymentId: string, amountPaid: number, status: PaymentStatus) => void;
@@ -88,6 +110,21 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(emptyAppData);
   const [loading, setLoading] = useState(true);
 
+  // React batches state updates within one synchronous tick, so two calls
+  // to (say) addStudent back-to-back without an intervening render would
+  // both compute their "next array" from the SAME stale `data.students`
+  // snapshot -- the second call's write would silently clobber the
+  // first's. dataRef is always up to date synchronously (updated the
+  // instant persistX runs, not on React's schedule), so every mutating
+  // action below reads/writes through it instead of the `data` state
+  // variable directly. `data` itself stays reactive as normal, for
+  // rendering -- the two are kept in sync by persistX always setting both
+  // together. (Not currently reachable through the UI, which only ever
+  // fires one mutating action per user gesture -- but a test that fired
+  // three addStudent calls in one tick surfaced exactly this, so it's
+  // real, not hypothetical.)
+  const dataRef = useRef<AppData>(emptyAppData);
+
   useEffect(() => {
     (async () => {
       // Five independent resources -- see server/serve.js and DESIGN.md.
@@ -101,67 +138,102 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         getItem('makeup'),
         getItem('payments'),
       ]);
-      setData({
+      const loaded: AppData = {
         students: parseResourceArray<Student>(studentsRaw),
         groups: parseResourceArray<ClassGroup>(classesRaw),
         sessions: [...parseResourceArray<SessionRecord>(attendanceRaw), ...parseResourceArray<SessionRecord>(makeupRaw)],
         payments: parseResourceArray<Payment>(paymentsRaw),
-      });
+      };
+      dataRef.current = loaded;
+      setData(loaded);
       setLoading(false);
     })();
   }, []);
 
-  const persistStudents = useCallback((students: Student[]) => {
-    setData((d) => ({ ...d, students }));
-    setItem('students', JSON.stringify(students));
+  // The UI updates immediately either way (setData above is synchronous) --
+  // this only reports when a save genuinely didn't reach a server that's
+  // known to exist (see setItem's doc comment: it never fires for the
+  // expected "no server in dev mode" case). One shared place for this
+  // means every action that goes through persistStudents/Groups/Sessions/
+  // Payments gets this protection automatically, instead of each of the
+  // dozen or so call sites needing to check it themselves.
+  const reportIfNotShared = useCallback((ok: boolean) => {
+    if (ok) return;
+    Alert.alert(
+      'Not saved to the shared server',
+      "This change only saved on this device for now — other devices (and this one, if you restart) won't see it until the connection is back. Check your Wi-Fi/network and try again.",
+    );
   }, []);
 
-  const persistGroups = useCallback((groups: ClassGroup[]) => {
-    setData((d) => ({ ...d, groups }));
-    setItem('classes', JSON.stringify(groups));
-  }, []);
+  const persistStudents = useCallback(
+    (students: Student[]) => {
+      dataRef.current = { ...dataRef.current, students };
+      setData(dataRef.current);
+      setItem('students', JSON.stringify(students)).then(reportIfNotShared);
+    },
+    [reportIfNotShared],
+  );
 
-  const persistSessions = useCallback((sessions: SessionRecord[]) => {
-    setData((d) => ({ ...d, sessions }));
-    setItem('attendance', JSON.stringify(sessions.filter((s) => !s.isMakeup)));
-    setItem('makeup', JSON.stringify(sessions.filter((s) => s.isMakeup)));
-  }, []);
+  const persistGroups = useCallback(
+    (groups: ClassGroup[]) => {
+      dataRef.current = { ...dataRef.current, groups };
+      setData(dataRef.current);
+      setItem('classes', JSON.stringify(groups)).then(reportIfNotShared);
+    },
+    [reportIfNotShared],
+  );
 
-  const persistPayments = useCallback((payments: Payment[]) => {
-    setData((d) => ({ ...d, payments }));
-    setItem('payments', JSON.stringify(payments));
-  }, []);
+  const persistSessions = useCallback(
+    (sessions: SessionRecord[]) => {
+      dataRef.current = { ...dataRef.current, sessions };
+      setData(dataRef.current);
+      Promise.all([
+        setItem('attendance', JSON.stringify(sessions.filter((s) => !s.isMakeup))),
+        setItem('makeup', JSON.stringify(sessions.filter((s) => s.isMakeup))),
+      ]).then(([attendanceOk, makeupOk]) => reportIfNotShared(attendanceOk && makeupOk));
+    },
+    [reportIfNotShared],
+  );
+
+  const persistPayments = useCallback(
+    (payments: Payment[]) => {
+      dataRef.current = { ...dataRef.current, payments };
+      setData(dataRef.current);
+      setItem('payments', JSON.stringify(payments)).then(reportIfNotShared);
+    },
+    [reportIfNotShared],
+  );
 
   const addStudent = useCallback<AppDataContextValue['addStudent']>(
     (input) => {
       const student: Student = { ...input, id: makeId('stu'), createdAt: new Date().toISOString() };
-      persistStudents([...data.students, student]);
+      persistStudents([...dataRef.current.students, student]);
       return student;
     },
-    [data.students, persistStudents],
+    [persistStudents],
   );
 
   const updateStudent = useCallback<AppDataContextValue['updateStudent']>(
     (id, patch) => {
-      persistStudents(data.students.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      persistStudents(dataRef.current.students.map((s) => (s.id === id ? { ...s, ...patch } : s)));
     },
-    [data.students, persistStudents],
+    [persistStudents],
   );
 
   const addGroup = useCallback<AppDataContextValue['addGroup']>(
     (input) => {
       const group: ClassGroup = { ...input, id: makeId('grp'), createdAt: new Date().toISOString() };
-      persistGroups([...data.groups, group]);
+      persistGroups([...dataRef.current.groups, group]);
       return group;
     },
-    [data.groups, persistGroups],
+    [persistGroups],
   );
 
   const updateGroup = useCallback<AppDataContextValue['updateGroup']>(
     (id, patch) => {
-      persistGroups(data.groups.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+      persistGroups(dataRef.current.groups.map((g) => (g.id === id ? { ...g, ...patch } : g)));
     },
-    [data.groups, persistGroups],
+    [persistGroups],
   );
 
   const getOccurrencesForDate = useCallback<AppDataContextValue['getOccurrencesForDate']>(
@@ -187,6 +259,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             groupName: group.name,
             isMakeup: false,
             studentIds: group.studentIds,
+            rosterCustomized: false,
             attendance: {},
             persisted: false,
           });
@@ -198,25 +271,28 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       for (const record of data.sessions) {
         if (record.date !== dateKey) continue;
         const group = record.groupId ? data.groups.find((g) => g.id === record.groupId) : undefined;
-        // A regular (non-makeup) record's roster tracks the group's
-        // CURRENT membership, not whoever was in it the day attendance
-        // was saved -- otherwise editing a class's students (e.g. fixing
-        // a 1-on-1 that should've been a group from the start) wouldn't
-        // show up on any date already marked, only on future ones. A
-        // makeup's studentIds is an intentional one-off list instead
-        // (e.g. just the one student joining another class as a guest),
-        // so it's left alone; same if the group itself was deleted.
-        const studentIds = !record.isMakeup && group ? group.studentIds : record.studentIds;
+        // A regular (non-makeup), not-deliberately-customized record's
+        // roster tracks the group's CURRENT membership, not whoever was
+        // in it the day attendance was saved -- otherwise editing a
+        // class's students (e.g. fixing a 1-on-1 that should've been a
+        // group from the start) wouldn't show up on any date already
+        // marked, only on future ones. rosterCustomized opts a record out
+        // of that (see its doc comment -- rescheduleStudents sets it when
+        // deliberately shrinking a roster). A makeup's studentIds is
+        // always an intentional one-off list, never auto-synced; same if
+        // the group itself was deleted.
+        const studentIds = !record.isMakeup && group && !record.rosterCustomized ? group.studentIds : record.studentIds;
         occurrences.push({
           id: record.id,
           date: record.date,
           startTime: record.startTime,
           durationMinutes: record.durationMinutes,
           groupId: record.groupId,
-          groupName: group ? group.name : record.isMakeup ? 'Makeup session' : 'Session',
+          groupName: group ? group.name : record.isMakeup ? 'Rescheduled session' : 'Session',
           isMakeup: record.isMakeup,
           makeupForRecordId: record.makeupForRecordId,
           studentIds,
+          rosterCustomized: !!record.rosterCustomized,
           attendance: record.attendance,
           persisted: true,
         });
@@ -230,7 +306,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const saveAttendance = useCallback<AppDataContextValue['saveAttendance']>(
     (occurrence, attendance) => {
-      const existingIndex = data.sessions.findIndex((s) => s.id === occurrence.id);
+      const sessions = dataRef.current.sessions;
+      const existingIndex = sessions.findIndex((s) => s.id === occurrence.id);
       const record: SessionRecord = {
         id: occurrence.id,
         date: occurrence.date,
@@ -240,17 +317,20 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         isMakeup: occurrence.isMakeup,
         makeupForRecordId: occurrence.makeupForRecordId,
         studentIds: occurrence.studentIds,
+        // Preserved here (and by the {...s, attendance} spread below for
+        // an already-persisted record) so a plain attendance save can
+        // never accidentally undo a deliberate roster reduction -- see
+        // SessionRecord.rosterCustomized.
+        rosterCustomized: occurrence.rosterCustomized,
         attendance,
         createdAt: new Date().toISOString(),
       };
       const nextSessions =
-        existingIndex >= 0
-          ? data.sessions.map((s, i) => (i === existingIndex ? { ...s, attendance } : s))
-          : [...data.sessions, record];
+        existingIndex >= 0 ? sessions.map((s, i) => (i === existingIndex ? { ...s, attendance } : s)) : [...sessions, record];
       persistSessions(nextSessions);
       return record;
     },
-    [data.sessions, persistSessions],
+    [persistSessions],
   );
 
   const scheduleMakeup = useCallback<AppDataContextValue['scheduleMakeup']>(
@@ -267,10 +347,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         attendance: {},
         createdAt: new Date().toISOString(),
       };
-      persistSessions([...data.sessions, record]);
+      persistSessions([...dataRef.current.sessions, record]);
       return record;
     },
-    [data.sessions, persistSessions],
+    [persistSessions],
   );
 
   const needsMakeup = useCallback<AppDataContextValue['needsMakeup']>(
@@ -281,6 +361,63 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       return !alreadyScheduled;
     },
     [data.sessions],
+  );
+
+  const rescheduleStudents = useCallback<AppDataContextValue['rescheduleStudents']>(
+    ({ source, studentIds, date, startTime, durationMinutes, intoGroupId }) => {
+      const remainingStudentIds = source.studentIds.filter((id) => !studentIds.includes(id));
+      const remainingAttendance = Object.fromEntries(
+        Object.entries(source.attendance).filter(([sid]) => remainingStudentIds.includes(sid)),
+      );
+
+      const movedRecord: SessionRecord = {
+        id: makeId('sess'),
+        date,
+        startTime,
+        durationMinutes,
+        groupId: intoGroupId ?? null,
+        isMakeup: true,
+        makeupForRecordId: source.id,
+        studentIds,
+        attendance: {},
+        createdAt: new Date().toISOString(),
+      };
+
+      // The source occurrence keeps only whoever ISN'T moving, so they
+      // don't show up on both dates. If everyone's moving AND the source
+      // is tied to a recurring group, an empty record still has to be
+      // kept (not dropped) -- otherwise getOccurrencesForDate would just
+      // regenerate a fresh virtual occurrence with the group's FULL
+      // roster for that date, undoing the move entirely. A one-off
+      // (groupless) source with nobody left, though, can just be dropped.
+      const withoutSource = dataRef.current.sessions.filter((s) => s.id !== source.id);
+      const nextSessions =
+        remainingStudentIds.length > 0 || source.groupId
+          ? [
+              ...withoutSource,
+              {
+                id: source.id,
+                date: source.date,
+                startTime: source.startTime,
+                durationMinutes: source.durationMinutes,
+                groupId: source.groupId,
+                isMakeup: source.isMakeup,
+                makeupForRecordId: source.makeupForRecordId,
+                studentIds: remainingStudentIds,
+                // Deliberately shrunk -- must not auto-sync back to the
+                // group's full roster (see rosterCustomized's doc comment).
+                rosterCustomized: true,
+                attendance: remainingAttendance,
+                createdAt: new Date().toISOString(),
+              } satisfies SessionRecord,
+              movedRecord,
+            ]
+          : [...withoutSource, movedRecord];
+
+      persistSessions(nextSessions);
+      return movedRecord;
+    },
+    [persistSessions],
   );
 
   const getMonthlyBilling = useCallback<AppDataContextValue['getMonthlyBilling']>(
@@ -328,18 +465,19 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   // month's computed billing rows if storage doesn't have it already.
   const resolvePayment = useCallback(
     (paymentId: string): { payments: Payment[]; payment: Payment } | null => {
-      const found = data.payments.find((p) => p.id === paymentId);
-      if (found) return { payments: data.payments, payment: found };
+      const payments = dataRef.current.payments;
+      const found = payments.find((p) => p.id === paymentId);
+      if (found) return { payments, payment: found };
 
-      const months = new Set(data.sessions.map((s) => s.date.slice(0, 7)));
+      const months = new Set(dataRef.current.sessions.map((s) => s.date.slice(0, 7)));
       months.add(toMonthKey(new Date()));
       for (const monthKey of months) {
         const row = getMonthlyBilling(monthKey).find((r) => r.payment.id === paymentId);
-        if (row) return { payments: [...data.payments, row.payment], payment: row.payment };
+        if (row) return { payments: [...payments, row.payment], payment: row.payment };
       }
       return null;
     },
-    [data, getMonthlyBilling],
+    [getMonthlyBilling],
   );
 
   const recordPayment = useCallback<AppDataContextValue['recordPayment']>(
@@ -380,6 +518,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       saveAttendance,
       scheduleMakeup,
       needsMakeup,
+      rescheduleStudents,
       getMonthlyBilling,
       recordPayment,
       markMessageSent,
@@ -395,6 +534,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       saveAttendance,
       scheduleMakeup,
       needsMakeup,
+      rescheduleStudents,
       getMonthlyBilling,
       recordPayment,
       markMessageSent,

@@ -1,6 +1,8 @@
 import React from 'react';
+import { Alert } from 'react-native';
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
+import { groupStudentsBySchedule } from '@/data/schedule-grouping';
 import { AppDataProvider, useAppData } from '@/data/store';
 
 // In-memory stand-in for src/data/storage.ts, keyed the same way the real
@@ -8,21 +10,35 @@ import { AppDataProvider, useAppData } from '@/data/store';
 // payments). This lets every test start from a clean, known state without
 // touching the filesystem, the network, or -- critically -- anything under
 // production/ (see DESIGN.md: production/ is never to be used for tests).
+// setItem resolves `true` (a successful shared save) by default, matching
+// the real module's contract -- __failNextSetItem lets one test simulate a
+// real server write failure without every other test having to know or
+// care about that return value.
 jest.mock('@/data/storage', () => {
   let store: Record<string, string> = {};
+  let failNext = false;
   return {
     getItem: jest.fn(async (key: string) => store[key] ?? null),
     setItem: jest.fn(async (key: string, value: string) => {
       store[key] = value;
+      if (failNext) {
+        failNext = false;
+        return false;
+      }
+      return true;
     }),
     __reset: () => {
       store = {};
+      failNext = false;
+    },
+    __failNextSetItem: () => {
+      failNext = true;
     },
   };
 });
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const mockStorage: { __reset: () => void } = require('@/data/storage');
+const mockStorage: { __reset: () => void; __failNextSetItem: () => void } = require('@/data/storage');
 
 beforeEach(() => {
   mockStorage.__reset();
@@ -47,6 +63,47 @@ describe('AppDataProvider / useAppData', () => {
     expect(result.current.data.payments).toEqual([]);
   });
 
+  // Regression coverage for the "Save Attendance always looked the same
+  // regardless of whether it actually worked" class of bug: a write that
+  // only succeeds locally (the mock's stand-in for the server rejecting
+  // it) must be surfaced, not silently swallowed -- and a normal
+  // successful write must NOT nag the user.
+  it('alerts when a save does not reach the shared server, but not on an ordinary successful save', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { result } = await setup();
+
+    await act(async () => {
+      result.current.addStudent({
+        name: 'Ava',
+        grade: '3',
+        parentName: 'Priya',
+        parentPhone: '15551234567',
+        ratePerSession: 40,
+        active: true,
+      });
+    });
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    mockStorage.__failNextSetItem();
+    await act(async () => {
+      result.current.addStudent({
+        name: 'Ben',
+        grade: '4',
+        parentName: 'Sam',
+        parentPhone: '15557654321',
+        ratePerSession: 30,
+        active: true,
+      });
+    });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toMatch(/not saved/i);
+    // The UI still updates optimistically either way -- the point is to
+    // surface the failure, not to lose the local edit too.
+    expect(result.current.data.students.map((s) => s.name)).toEqual(['Ava', 'Ben']);
+
+    alertSpy.mockRestore();
+  });
+
   it('adds and updates a student', async () => {
     const { result } = await setup();
 
@@ -69,6 +126,49 @@ describe('AppDataProvider / useAppData', () => {
       result.current.updateStudent(student!.id, { ratePerSession: 45 });
     });
     expect(result.current.data.students[0].ratePerSession).toBe(45);
+  });
+
+  // Regression test: React batches state updates within one synchronous
+  // tick, so three back-to-back addStudent calls used to each compute
+  // their "next array" from the same stale data.students snapshot --
+  // each call clobbered the previous one's write, silently keeping only
+  // the last student. Not reachable through the real UI today (every
+  // screen only ever fires one mutating action per user gesture), but
+  // real and worth locking down -- store.tsx now routes every mutating
+  // action through a ref that's updated synchronously, not on React's
+  // schedule, specifically so this can't happen even if a future feature
+  // (e.g. bulk import) ever calls these back-to-back.
+  it('keeps every student when several are added without an intervening render', async () => {
+    const { result } = await setup();
+
+    await act(async () => {
+      result.current.addStudent({
+        name: 'Ava',
+        grade: '3',
+        parentName: 'P1',
+        parentPhone: '15551110001',
+        ratePerSession: 30,
+        active: true,
+      });
+      result.current.addStudent({
+        name: 'Ben',
+        grade: '4',
+        parentName: 'P2',
+        parentPhone: '15551110002',
+        ratePerSession: 30,
+        active: true,
+      });
+      result.current.addStudent({
+        name: 'Cara',
+        grade: '4',
+        parentName: 'P3',
+        parentPhone: '15551110003',
+        ratePerSession: 30,
+        active: true,
+      });
+    });
+
+    expect(result.current.data.students.map((s) => s.name)).toEqual(['Ava', 'Ben', 'Cara']);
   });
 
   it('adds a class and computes a virtual occurrence for its weekly slot', async () => {
@@ -301,6 +401,85 @@ describe('AppDataProvider / useAppData', () => {
     expect(makeupOcc).toBeDefined();
     expect(makeupOcc.makeupForRecordId).toBe(missed.id);
     expect(makeupOcc.groupName).toBe('Tuesday Group'); // resolved via intoGroupId
+  });
+
+  it('rescheduleStudents proactively moves some (not all) students without anyone being marked absent', async () => {
+    const { result } = await setup();
+
+    let a, b, c;
+    await act(async () => {
+      a = result.current.addStudent({
+        name: 'Alice',
+        grade: '3',
+        parentName: 'PA',
+        parentPhone: '15551110001',
+        ratePerSession: 30,
+        active: true,
+      });
+      b = result.current.addStudent({
+        name: 'Ben',
+        grade: '4',
+        parentName: 'PB',
+        parentPhone: '15551110002',
+        ratePerSession: 30,
+        active: true,
+      });
+      c = result.current.addStudent({
+        name: 'Cara',
+        grade: '4',
+        parentName: 'PC',
+        parentPhone: '15551110003',
+        ratePerSession: 30,
+        active: true,
+      });
+    });
+    await act(async () => {
+      result.current.addGroup({
+        name: 'Friday_4-5',
+        type: 'group',
+        studentIds: [a!.id, b!.id, c!.id],
+        // 2026-09-11 2026 is a Friday (dayOfWeek 5).
+        schedule: [{ dayOfWeek: 5, startTime: '16:00', durationMinutes: 60 }],
+        active: true,
+      });
+    });
+
+    // Tomorrow's class hasn't happened yet -- nobody is absent, nothing's
+    // been marked at all. Move Alice and Ben to today instead.
+    const tomorrow = result.current.getOccurrencesForDate(new Date(2026, 8, 11))[0];
+    expect(tomorrow.persisted).toBe(false);
+
+    await act(async () => {
+      result.current.rescheduleStudents({
+        source: tomorrow,
+        studentIds: [a!.id, b!.id],
+        date: '2026-09-10',
+        startTime: '16:00',
+        durationMinutes: 60,
+        intoGroupId: tomorrow.groupId ?? undefined,
+      });
+    });
+
+    // Today shows a new one-off session for just Alice and Ben.
+    const todayOccurrences = result.current.getOccurrencesForDate(new Date(2026, 8, 10));
+    const movedOcc = todayOccurrences.find((o) => o.isMakeup)!;
+    expect(movedOcc).toBeDefined();
+    expect(movedOcc.studentIds.sort()).toEqual([a!.id, b!.id].sort());
+    expect(movedOcc.groupName).toBe('Friday_4-5');
+
+    // Tomorrow now shows only Cara -- Alice and Ben don't show up twice.
+    const tomorrowAfter = result.current.getOccurrencesForDate(new Date(2026, 8, 11))[0];
+    expect(tomorrowAfter.persisted).toBe(true);
+    expect(tomorrowAfter.studentIds).toEqual([c!.id]);
+
+    // The one-time move is purely a dated exception -- it must NOT change
+    // where Alice/Ben show up in the day/class grouping (Students/Billing
+    // tabs), which is derived only from the group's own recurring
+    // schedule, not from any of these session records.
+    const grouped = groupStudentsBySchedule(result.current.data.students, result.current.data.groups);
+    expect(grouped.days).toHaveLength(1); // still just Friday -- no new "day" appeared
+    expect(grouped.days[0].dayName).toBe('Friday');
+    expect(grouped.days[0].classes[0].students.map((s) => s.id).sort()).toEqual([a!.id, b!.id, c!.id].sort());
   });
 
   describe('billing', () => {

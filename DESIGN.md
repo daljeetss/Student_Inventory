@@ -46,12 +46,54 @@ TUTORING_DATA_DIR=/tmp/some-test-folder node server/serve.js
 ```
 
 **Dev mode is different.** Running via `npm start` (Expo Go) or `npm run
-web` doesn't start `server/serve.js` at all — there's no `/api/data` to
-talk to. In that case the app falls back to on-device storage (AsyncStorage
-on phones, `localStorage` on web), so each device has its own separate
-copy. That's fine for trying out a code change, but it's why day-to-day use
-should go through `npm run serve`, not dev mode — see
+web` doesn't start `server/serve.js` at all — there's no `/api/<resource>`
+to talk to. In that case the app falls back to on-device storage
+(AsyncStorage on phones, `localStorage` on web), so each device has its own
+separate copy. That's fine for trying out a code change, but it's why
+day-to-day use should go through `npm run serve`, not dev mode — see
 [storage.ts's fallback logic](./src/data/storage.ts).
+
+**A save always updates the screen immediately** (`store.tsx`'s
+`persistStudents`/`Groups`/`Sessions`/`Payments` all call `setData(...)`
+synchronously, before the network call even starts) — but that's *local*
+state, not proof the save reached the shared server. `storage.ts`'s
+`setItem` returns whether it actually did, with one deliberate wrinkle: it
+tracks `serverConfirmedReachable` (has any `/api/<resource>` call
+succeeded yet this session?) so it can tell "there's no server at all"
+(dev mode — the expected, silent, correct fallback to local-only storage)
+apart from "there IS a server and this particular write didn't reach it"
+(a real failure — the local update happened, but no other device will see
+it, and it won't survive this device forgetting it). Only the second case
+returns `false`. `store.tsx`'s `reportIfNotShared` is the one place all
+four `persist*` helpers route through it, so `Alert.alert`s a plain,
+honest warning — every action that goes through any of them (there are
+about a dozen) gets this for free, rather than each needing its own check.
+This exists for the same reason as the Save Attendance button showing
+"✓ Saved"/disabled instead of always looking the same regardless of
+whether anything actually saved (see Testing, below, for the regression
+test) — a save that silently might not have worked is exactly the kind of
+thing that caused the original data-loss incident this whole `production/`
+design is a reaction to.
+
+**Two mutating actions in the same tick can't clobber each other**, via a
+`dataRef` (a plain `useRef`, not `data` the state variable) that every
+`persist*` helper updates *synchronously* the instant it runs, before
+`setItem`'s network call even starts. Every action that computes a "next
+array" (`addStudent`, `updateStudent`, `addGroup`, `updateGroup`,
+`saveAttendance`, `scheduleMakeup`, `rescheduleStudents`, and the payment
+functions via `resolvePayment`) reads from `dataRef.current`, never from
+the `data` state variable directly. The reason this matters: React batches
+state updates within one synchronous tick, so two calls back-to-back
+*before* a re-render would, without this, both read the same stale
+`data.students` snapshot — the second call's write silently overwrites the
+first's, losing it. Not reachable through the UI today (every screen fires
+exactly one mutating action per user gesture), but it's a real bug, not a
+hypothetical one — a test that fired three `addStudent` calls in one
+`act()` block surfaced it directly, is now a permanent regression test,
+and the fix (not the test) is what actually resolves it. Purely-reading
+functions used for rendering (`getOccurrencesForDate`, `getMonthlyBilling`)
+deliberately still read the reactive `data` state, not the ref — they need
+to re-run when React re-renders, which reading a ref wouldn't trigger.
 
 ## Access token
 
@@ -244,16 +286,93 @@ of two ways:
   [`src/data/date.ts`](./src/data/date.ts)), with a "use the week after
   instead" button to push it out further. This sets `groupId` to that
   *other* class's id — purely for display (so the occurrence card reads
-  e.g. "Tuesday Group (makeup)" and shows up alongside that class's own
-  card on that date) — it does **not** add the student to that class's
-  roster or affect its own attendance record.
-- **Custom date/time** — `groupId: null`, a freely typed one-off time, for
-  anything that doesn't match an existing slot.
+  e.g. "Tuesday Group (rescheduled)" and shows up alongside that class's
+  own card on that date) — it does **not** add the student to that
+  class's roster or affect its own attendance record.
+- **Custom date/time** — the date comes from
+  [`DatePickerField`](./src/components/ui/date-picker-field.tsx), a
+  hand-built month calendar grid (tap the field, pick a day) rather than
+  typing "YYYY-MM-DD" by hand — a real native module
+  (`@react-native-community/datetimepicker`) would behave differently or
+  not render at all on web, so this is plain View/Pressable/Text, giving
+  one consistent look on web/iOS/Android; the time and duration are still
+  plain typed fields. `groupId` defaults to the *source* occurrence's own
+  group when one's given (see `rescheduleStudents` below) rather than
+  `null`, so a same-class move still reads as that
+  class's name, not a generic "Rescheduled session".
 
 Either way it's billed exactly like any other session — billing doesn't
 distinguish makeups from regular attendance, it just counts every
 `SessionRecord` in the month where that student's attendance is
 `"present"`.
+
+### Proactively rescheduling students, not just compensating for absences
+
+`scheduleMakeup` (above) always starts from an absence — someone has to be
+marked absent first. `rescheduleStudents` is the other direction: moving
+some (not necessarily all) students out of an occurrence that **hasn't
+happened yet**, nobody's absent, nothing's been marked — e.g. "2 of the 3
+kids in tomorrow's group are doing it today instead, just this time."
+Triggered by **Reschedule Students** on the attendance screen (works on
+any date, not just past/present ones), via
+[`RescheduleForm`](./src/components/reschedule-form.tsx): pick who's
+moving, then the same destination picker as makeups
+([`MakeupForm`](./src/components/makeup-form.tsx), generalized to accept a
+caller-supplied `heading` and a `defaultGroupId` for exactly this case).
+
+It splits one occurrence into two `SessionRecord`s: the moved students get
+a new one-off record at the destination (`isMakeup: true`,
+`makeupForRecordId` pointing back at the source — same mechanism as a
+makeup, just not compensating for a recorded absence), and the *source*
+occurrence is persisted with only the students who AREN'T moving, so they
+don't show up on both dates.
+
+That second part needed a new field, `SessionRecord.rosterCustomized`.
+Recall from above that a regular record's roster normally tracks its
+group's *current* membership live, specifically so correcting a class's
+students retroactively fixes already-marked dates. Without an escape
+hatch, that same behavior would instantly undo a deliberate roster
+reduction — the very next render would recompute the source occurrence's
+roster from the group's full membership again, silently putting the moved
+students right back. `rosterCustomized: true` opts a record out of that
+auto-sync, and `saveAttendance` always carries the flag through
+(`occurrence.rosterCustomized` → the saved record), so a later attendance
+save on that same reduced occurrence can't lose it either. If *everyone*
+in a group-tied occurrence moves, the source record is still kept (with an
+empty `studentIds`, `rosterCustomized: true`) rather than deleted — deleting
+it would let the virtual-occurrence generator regenerate a fresh one with
+the group's full roster on the next render, exactly the same problem.
+
+### Grouping students by day/class instead of one flat list
+
+[`groupStudentsBySchedule`](./src/data/schedule-grouping.ts) is a small,
+pure function shared by the Students and Billing tabs, so both group the
+same way: day → which class meets that day → its students, in start-time
+order, with "No class scheduled yet" (active students in no active class)
+and — Students only, since Billing already excludes inactive students
+entirely — "Inactive" as trailing buckets. A class with more than one
+weekly slot appears once per day it meets, with the identical roster each
+time; that's intentional, not a duplicate-data bug — "who's in Tuesday's
+group" and "who's in Thursday's group" are two different questions even
+when the answer happens to be the same class. It takes plain
+`Student[]`/`ClassGroup[]` and returns grouped *students*, not
+screen-specific rows, so Billing maps each grouped student back to its own
+`BillingRow` via a `Map` lookup rather than the utility needing to know
+anything about billing.
+
+The Classes tab groups the same way but has its own sibling function,
+`groupClassesBySchedule` (same file) — day → classes meeting that day,
+sorted by start time — rather than reusing `groupStudentsBySchedule`,
+since a *class* is the thing being listed there, not a student, and the
+two have genuinely different trailing buckets: "No weekly time set yet"
+(active classes with an empty `schedule`) and "Inactive" (regardless of
+schedule) — there's no equivalent to `groupStudentsBySchedule`'s
+active-student roster filtering to reuse, since Classes shows every
+member of a class (active or not) same as it always did. Some inner-loop
+logic between the two functions is duplicated rather than shared, on
+purpose — their outputs differ enough (per-class vs. per-class-with-
+filtered-students) that forcing one abstraction over both would cost more
+clarity than the few shared lines are worth.
 
 ### Billing: why the Payment id is deterministic
 

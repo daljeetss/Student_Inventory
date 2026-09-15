@@ -137,7 +137,7 @@ export default function StudentDetailScreen() {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
             <ThemedText type="small">
               {formatDateLabel(s.date)} · {formatTime(s.startTime)}
-              {s.isMakeup ? ' (makeup)' : ''}
+              {s.isMakeup ? ' (rescheduled)' : ''}
             </ThemedText>
             <Badge
               label={s.attendance[student.id] === 'present' ? 'Present' : 'Absent'}

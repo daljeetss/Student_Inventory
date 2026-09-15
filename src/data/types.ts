@@ -52,6 +52,15 @@ export interface SessionRecord {
   /** id of the SessionRecord this makeup compensates for, if any */
   makeupForRecordId?: string;
   studentIds: string[];
+  /** True when `studentIds` was deliberately set to something other than
+   * the group's current roster -- e.g. rescheduleStudents shrinking this
+   * occurrence's roster because some students moved elsewhere. Without
+   * this, a regular (non-makeup) record's roster always tracks the
+   * group's CURRENT membership live (see getOccurrencesForDate), which is
+   * what makes correcting a class's students retroactively update
+   * already-marked dates -- but that same behavior would silently undo a
+   * deliberate roster reduction, so this flag opts a record out of it. */
+  rosterCustomized?: boolean;
   attendance: Record<string, AttendanceStatus>;
   notes?: string;
   createdAt: string;

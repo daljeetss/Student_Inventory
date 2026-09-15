@@ -72,19 +72,41 @@ while using the app.
 ## How it works
 
 - **Students** — add each student with their grade, parent's name/WhatsApp
-  number, and their per-session rate.
+  number, and their per-session rate. The list is grouped by day and then
+  by which class meets that day (a class meeting twice a week shows up
+  under both days, same roster), so it reads the way you actually think
+  about your week, not an alphabetical list — with "No class scheduled
+  yet" and "Inactive" sections at the end for anyone that doesn't fit a
+  day. **Billing** groups the same way.
 - **Classes** — set up each recurring weekly class (1-on-1 or group), who's
-  in it, and what day/time it meets. The **Today** tab automatically shows
+  in it, and what day/time it meets. The list itself is grouped by day too
+  (sorted by start time within each day), with "No weekly time set yet"
+  and "Inactive" sections at the end. The **Today** tab automatically shows
   what's scheduled for any given day based on this.
-- **Today** — tap a class to mark each student present/absent. If someone's
+- **Today** — tap a class to mark each student present/absent, then **Save
+  Attendance**, which turns into a greyed-out **✓ Saved** once it's
+  actually saved (and back to the normal button the moment you change
+  something, so it's never ambiguous whether your latest change is saved).
+  If a save can't reach the shared server at all (e.g. no Wi-Fi), you'll
+  get a clear warning instead of it just silently not going through — this
+  same protection applies to every save in the app, not just attendance.
+  If someone's
   absent, you can immediately schedule a makeup two ways: **join an
   existing class's weekly slot** as a one-time guest (pick the class, pick
   which day/time if it meets more than once a week, and it suggests the
   soonest matching date — with a "use the week after instead" option if
   that one doesn't work), or a fully **custom one-off date/time** for
   anything that doesn't fit an existing slot. Either way it's linked back
-  to the missed class, and shows up on the makeup date as its own card
-  (e.g. "Tuesday Group (makeup)") alongside that class's regular roster.
+  to the missed class, and shows up on the new date as its own card
+  (e.g. "Tuesday Group (rescheduled)") alongside that class's regular
+  roster. You don't have to wait for an absence to use this: **Reschedule
+  Students**, on any class (even one that hasn't happened yet), lets you
+  proactively move just some of the students to a different time — e.g.
+  "2 of the 3 kids in tomorrow's group are doing it today instead, just
+  this once." Pick who's moving, then the same join-an-existing-class-or-
+  custom-time picker as makeups. Tomorrow's class then correctly shows
+  only the student who's still coming then — the moved students don't
+  show up twice.
   Each class also has
   a **Remind via WhatsApp** button for an on-demand "you have class..."
   nudge — one tap shows every student in the class with their own editable,
