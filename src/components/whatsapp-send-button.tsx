@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TextField } from '@/components/ui/text-field';
 import { Student } from '@/data/types';
+import { alert } from '@/utils/alert';
 import { openWhatsAppMessage } from '@/data/whatsapp';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -51,7 +52,7 @@ export function WhatsAppSendButton({ students, buildMessage, label = 'Send via W
   const send = async (student: Student) => {
     const ok = await openWhatsAppMessage(student.parentPhone, messages[student.id] ?? '');
     if (!ok) {
-      Alert.alert('Could not open WhatsApp', 'Check that WhatsApp is installed and the phone number is correct.');
+      alert('Could not open WhatsApp', 'Check that WhatsApp is installed and the phone number is correct.');
       return;
     }
     setSentIds((prev) => new Set(prev).add(student.id));

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { DatePickerField } from '@/components/ui/date-picker-field';
 import { TextField } from '@/components/ui/text-field';
 import { addDays, DAY_NAMES_SHORT, formatDateLabel, formatTime, fromDateKey, nextOccurrenceOnOrAfter, toDateKey } from '@/data/date';
 import { ClassGroup } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 export interface MakeupSelection {
   date: string;
@@ -69,12 +70,12 @@ export function MakeupForm({ heading, missedDate, missedDurationMinutes, groups,
 
   const confirm = () => {
     if (mode === 'existing') {
-      if (!group || !slot || !existingDateKey) return Alert.alert('Pick a class', 'Choose which class and time to join.');
+      if (!group || !slot || !existingDateKey) return alert('Pick a class', 'Choose which class and time to join.');
       onConfirm({ date: existingDateKey, startTime: slot.startTime, durationMinutes: slot.durationMinutes, intoGroupId: group.id });
       return;
     }
-    if (!customDate) return Alert.alert('Pick a date', 'Tap the date field to choose one from the calendar.');
-    if (!/^\d{1,2}:\d{2}$/.test(customTime)) return Alert.alert('Invalid time', 'Use 24h HH:mm.');
+    if (!customDate) return alert('Pick a date', 'Tap the date field to choose one from the calendar.');
+    if (!/^\d{1,2}:\d{2}$/.test(customTime)) return alert('Invalid time', 'Use 24h HH:mm.');
     onConfirm({
       date: customDate,
       startTime: customTime,

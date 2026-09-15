@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
 
 import { ScheduleEditor } from '@/components/schedule-editor';
 import { ThemedText } from '@/components/themed-text';
@@ -10,6 +10,7 @@ import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
 import { useAppData } from '@/data/store';
 import { ClassType, WeeklySlot } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 const TYPE_OPTIONS: { value: ClassType; label: string }[] = [
   { value: 'one-on-one', label: '1-on-1' },
@@ -26,13 +27,13 @@ export default function NewGroupScreen() {
   const [slots, setSlots] = useState<WeeklySlot[]>([{ dayOfWeek: 1, startTime: '16:00', durationMinutes: 60 }]);
 
   const save = () => {
-    if (!name.trim()) return Alert.alert('Name required', 'e.g. "Tuesday 4pm Group" or a student\'s name.');
-    if (studentIds.length === 0) return Alert.alert('Pick at least one student');
+    if (!name.trim()) return alert('Name required', 'e.g. "Tuesday 4pm Group" or a student\'s name.');
+    if (studentIds.length === 0) return alert('Pick at least one student');
     if (type[0] === 'one-on-one' && studentIds.length > 1) {
-      return Alert.alert('1-on-1 can only have one student', 'Switch to "Group" for more than one.');
+      return alert('1-on-1 can only have one student', 'Switch to "Group" for more than one.');
     }
     for (const s of slots) {
-      if (!/^\d{1,2}:\d{2}$/.test(s.startTime)) return Alert.alert('Invalid time', 'Use 24h format like 16:00.');
+      if (!/^\d{1,2}:\d{2}$/.test(s.startTime)) return alert('Invalid time', 'Use 24h format like 16:00.');
     }
 
     addGroup({ name: name.trim(), type: type[0], studentIds, schedule: slots, active: true });

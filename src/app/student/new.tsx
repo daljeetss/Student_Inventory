@@ -1,6 +1,5 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Alert } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Button } from '@/components/ui/button';
@@ -9,6 +8,7 @@ import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
 import { useAppData } from '@/data/store';
 import { Grade } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 const GRADE_OPTIONS: { value: Grade; label: string }[] = [
   { value: 'K', label: 'K' },
@@ -32,11 +32,11 @@ export default function NewStudentScreen() {
   const [notes, setNotes] = useState('');
 
   const save = () => {
-    if (!name.trim()) return Alert.alert('Name required', "Enter the student's name.");
-    if (!parentPhone.trim()) return Alert.alert('Phone required', "Enter the parent's WhatsApp phone number.");
+    if (!name.trim()) return alert('Name required', "Enter the student's name.");
+    if (!parentPhone.trim()) return alert('Phone required', "Enter the parent's WhatsApp phone number.");
     const parsedRate = Number(rate);
     if (!rate || Number.isNaN(parsedRate) || parsedRate <= 0) {
-      return Alert.alert('Rate required', 'Enter a valid per-session rate, e.g. 40.');
+      return alert('Rate required', 'Enter a valid per-session rate, e.g. 40.');
     }
 
     addStudent({

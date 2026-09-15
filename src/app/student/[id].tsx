@@ -1,6 +1,6 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +12,7 @@ import { TextField } from '@/components/ui/text-field';
 import { formatDateLabel, formatTime } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { Grade } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 const GRADE_OPTIONS: { value: Grade; label: string }[] = ['K', '1', '2', '3', '4', '5', '6', '7', '8'].map((g) => ({
   value: g as Grade,
@@ -46,8 +47,8 @@ export default function StudentDetailScreen() {
 
   const save = () => {
     const parsedRate = Number(rate);
-    if (!name.trim()) return Alert.alert('Name required');
-    if (!rate || Number.isNaN(parsedRate) || parsedRate <= 0) return Alert.alert('Enter a valid rate');
+    if (!name.trim()) return alert('Name required');
+    if (!rate || Number.isNaN(parsedRate) || parsedRate <= 0) return alert('Enter a valid rate');
     updateStudent(student.id, {
       name: name.trim(),
       grade: grade[0],
@@ -120,7 +121,7 @@ export default function StudentDetailScreen() {
         <View style={{ flex: 1 }}>
           <Button
             title={student.active ? 'Mark Inactive' : 'Mark Active'}
-            variant="ghost"
+            variant={student.active ? 'danger' : 'primary'}
             onPress={() => updateStudent(student.id, { active: !student.active })}
           />
         </View>

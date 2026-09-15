@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Alert, Pressable, View } from 'react-native';
+import { Pressable, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +12,7 @@ import { addMonths, formatTime, monthKeyLabel, toMonthKey } from '@/data/date';
 import { groupStudentsBySchedule } from '@/data/schedule-grouping';
 import { BillingRow, useAppData } from '@/data/store';
 import { PaymentStatus } from '@/data/types';
+import { alert } from '@/utils/alert';
 import { buildDueMessage } from '@/data/whatsapp';
 
 const STATUS_TONE: Record<PaymentStatus, 'primary' | 'warning' | 'danger'> = {
@@ -140,7 +141,7 @@ export default function BillingScreen() {
 
   const submitPartial = (row: BillingRow) => {
     const amount = Number(partialAmount);
-    if (Number.isNaN(amount) || amount <= 0) return Alert.alert('Enter a valid amount');
+    if (Number.isNaN(amount) || amount <= 0) return alert('Enter a valid amount');
     const status: PaymentStatus = amount >= row.amountDue ? 'paid' : 'partially-paid';
     recordPayment(row.payment.id, amount, status);
     setPartialFor(null);

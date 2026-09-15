@@ -195,6 +195,21 @@ describe('per-resource data endpoints', () => {
 });
 
 describe('automatic backups', () => {
+  // Backups are now whole-database snapshots (one flat tutoring-<stamp>.db
+  // file per backup, see server/db/sqlite-store.js), not a per-resource
+  // JSON directory -- read one back with node:sqlite the same way the
+  // store itself would.
+  function readSnapshotResource(dbPath, resource) {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const rows = db.prepare('SELECT data FROM records WHERE resource = ? ORDER BY seq ASC').all(resource);
+      return rows.map((row) => JSON.parse(row.data));
+    } finally {
+      db.close();
+    }
+  }
+
   it('does not back up on the very first write (nothing existed yet)', async () => {
     const backupsDir = path.join(dataDir, 'backups');
     const before = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
@@ -204,7 +219,7 @@ describe('automatic backups', () => {
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify([]),
     });
-    // makeup.json may already have been written by an earlier test in this
+    // makeup may already have been written by an earlier test in this
     // file; this test only asserts backups never shrink or error, since
     // exact counts depend on test execution order.
     const after = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
@@ -234,7 +249,7 @@ describe('automatic backups', () => {
     expect(snapshots.length).toBeGreaterThan(before);
 
     const newestSnapshot = snapshots.sort().at(-1);
-    const snapshotContent = JSON.parse(fs.readFileSync(path.join(backupsDir, newestSnapshot, `${resource}.json`), 'utf8'));
+    const snapshotContent = readSnapshotResource(path.join(backupsDir, newestSnapshot), resource);
     expect(snapshotContent).toEqual(first);
 
     const current = await (await fetch(`${baseUrl}/api/${resource}`, { headers: authHeaders() })).json();

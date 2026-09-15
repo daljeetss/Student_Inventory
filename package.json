@@ -67,7 +67,7 @@
         "displayName": "server",
         "testEnvironment": "node",
         "testMatch": [
-          "<rootDir>/server/__tests__/**/*.test.js"
+          "<rootDir>/server/**/__tests__/**/*.test.js"
         ]
       }
     ]

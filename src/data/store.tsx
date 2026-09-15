@@ -1,5 +1,4 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert } from 'react-native';
 
 import { toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
@@ -14,6 +13,7 @@ import {
   Student,
   emptyAppData,
 } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 /** A session occurrence ready to display/mark attendance for — either a
  * persisted SessionRecord, or a "virtual" one computed from a group's
@@ -159,7 +159,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   // dozen or so call sites needing to check it themselves.
   const reportIfNotShared = useCallback((ok: boolean) => {
     if (ok) return;
-    Alert.alert(
+    alert(
       'Not saved to the shared server',
       "This change only saved on this device for now — other devices (and this one, if you restart) won't see it until the connection is back. Check your Wi-Fi/network and try again.",
     );

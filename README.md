@@ -122,16 +122,20 @@ while using the app.
   month shows no reminder/payment actions at all.
 
 **Where the data lives depends on how you're running it:**
-- Via `npm run serve` (recommended, see below) — all data lives in the
-  `production/` folder on this computer, one file per kind of data
-  (students, classes, attendance, makeup, payments — see
-  [DESIGN.md](./DESIGN.md) for exactly how). Every device that opens the
-  app through this server (your wife's phone, your phone, a browser on this
-  computer) reads and writes those same files, so they all show the same
-  data. This is also why it survives restarting the server: those files
-  aren't touched by starting/stopping the Node process. `production/` is
-  automatically backed up before every single save (into
-  `production/backups/`) and is never to be used for testing.
+- Via `npm run serve` (recommended, see below) — all data lives in one
+  SQLite database, `production/tutoring.db`, on this computer (students,
+  classes, attendance, makeup, payments — see [DESIGN.md](./DESIGN.md) for
+  exactly how). Every device that opens the app through this server (your
+  wife's phone, your phone, a browser on this computer) reads and writes
+  that same database, so they all show the same data. This is also why it
+  survives restarting the server: the database isn't touched by
+  starting/stopping the Node process. `production/` is automatically
+  backed up before every single save (into `production/backups/`) and is
+  never to be used for testing. If you're upgrading from an older version
+  of this app that used separate `students.json`/`classes.json`/etc. files,
+  nothing to do — the next `npm run serve` imports them into
+  `tutoring.db` automatically, once, and leaves the originals in place
+  untouched.
 - Via Expo Go or `npm run web` (dev mode) — there's no server-side API in
   that mode, so it falls back to on-device storage (AsyncStorage on phones,
   localStorage on web), separate per device. This only matters for active
@@ -235,10 +239,17 @@ src/
     whatsapp.ts   builds the due-amount/reminder messages + wa.me links
     date.ts       date/time formatting helpers
     __tests__/    unit tests for the above (npm test)
+  utils/
+    alert.ts      cross-platform alert() -- use instead of Alert from
+                  'react-native' everywhere (its web version is a no-op)
 
 server/           the "npm run serve" home-screen-app server (see DESIGN.md)
   __tests__/      integration tests for serve.js (npm test)
   serve.js        static file server + token auth + /api/<resource>
+  db/             the data store, decoupled from serve.js (see DESIGN.md)
+    store.js        the interface serve.js actually calls
+    sqlite-store.js  the SQLite implementation (+ legacy JSON migration)
+    __tests__/       unit tests for the store, no HTTP involved
   backup.sh       npm run backup -- encrypted off-machine backup
   restore.sh      npm run restore -- reverses a backup.sh backup
   gdrive-auth.js  npm run gdrive-auth -- one-time Google Drive connection
@@ -248,8 +259,9 @@ server/           the "npm run serve" home-screen-app server (see DESIGN.md)
   access-token.txt   generated at runtime, not committed
 
 production/       ALL real data lives here -- never touch for testing.
-  students.json, classes.json, attendance.json, makeup.json, payments.json
-  backups/        automatic snapshot of the whole folder before every save
+  tutoring.db     SQLite database -- students, classes, attendance,
+                  makeup, payments all live here now (see DESIGN.md)
+  backups/        automatic snapshot of the database before every save
 ```
 
 See [DESIGN.md](./DESIGN.md) for how these pieces talk to each other.

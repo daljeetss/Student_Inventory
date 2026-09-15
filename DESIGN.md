@@ -18,7 +18,8 @@ flowchart LR
 
     subgraph Mac["Your Mac — npm run serve"]
         S["server/serve.js<br/>(token auth + static files + /api/&lt;resource&gt;)"]
-        D[("production/<br/>students.json, classes.json,<br/>attendance.json, makeup.json,<br/>payments.json")]
+        ST["server/db/store.js<br/>(storage interface)"]
+        D[("production/tutoring.db<br/>(SQLite — students, classes,<br/>attendance, makeup, payments)")]
         W["dist/<br/>(built web app)"]
     end
 
@@ -26,15 +27,26 @@ flowchart LR
     B -- Wi-Fi --> S
     C -- localhost --> S
     S -- serves --> W
-    S <-->|GET/POST /api/students etc.| D
+    S -->|getResource/setResource| ST
+    ST <--> D
 ```
 
 All three devices talk to the **same** `server/serve.js` process, which
-reads/writes the files in `production/` — that's the entire "database,"
-one plain JSON array per entity, nowhere else. There's no separate backend
-or cloud service. This is what makes the students/classes/billing
-consistent across your wife's phone, your phone, and the Mac's browser, as
-long as they're all on the same Wi-Fi and the server's running.
+reads/writes through `server/db/store.js` — that's the entire "database,"
+nowhere else. There's no separate backend or cloud service. This is what
+makes the students/classes/billing consistent across your wife's phone,
+your phone, and the Mac's browser, as long as they're all on the same
+Wi-Fi and the server's running.
+
+`serve.js` never talks to SQLite directly — it only ever calls
+`store.js`'s `getResource`/`setResource`, which is implemented today by
+`server/db/sqlite-store.js`. That one extra layer is deliberate: it's a
+decoupled module boundary, so a future storage backend (e.g. a cloud-hosted
+database, for reachability beyond the home Wi-Fi — see README's "Beyond
+the home Wi-Fi") is a new file behind the same three-method contract, not a
+rewrite of the HTTP/auth/static-file code in `serve.js`. See
+[Data storage](#data-storage-sqlite-behind-a-decoupled-module) below for
+what's actually inside that module.
 
 `production/` is not to be touched for anything but real use — no testing,
 no seeding fixtures, nothing (see [Automatic backups](#data-model) below
@@ -65,15 +77,47 @@ apart from "there IS a server and this particular write didn't reach it"
 (a real failure — the local update happened, but no other device will see
 it, and it won't survive this device forgetting it). Only the second case
 returns `false`. `store.tsx`'s `reportIfNotShared` is the one place all
-four `persist*` helpers route through it, so `Alert.alert`s a plain,
-honest warning — every action that goes through any of them (there are
-about a dozen) gets this for free, rather than each needing its own check.
-This exists for the same reason as the Save Attendance button showing
+four `persist*` helpers route through it, so it alerts a plain, honest
+warning — every action that goes through any of them (there are about a
+dozen) gets this for free, rather than each needing its own check. This
+exists for the same reason as the Save Attendance button showing
 "✓ Saved"/disabled instead of always looking the same regardless of
 whether anything actually saved (see Testing, below, for the regression
 test) — a save that silently might not have worked is exactly the kind of
 thing that caused the original data-loss incident this whole `production/`
 design is a reaction to.
+
+**Alerts always use `src/utils/alert.ts`, never `Alert` from
+`'react-native'` directly.** react-native-web's `Alert.alert` is a hard
+no-op (`static alert() {}` — does genuinely nothing, not even a console
+warning). Since this app is actually run day-to-day as the web export
+(`npm run serve` + "Add to Home Screen" — see README), every
+`Alert.alert(...)` call in the app, across every screen, was silently
+doing nothing on the platform it's really used on. This is what made
+Classes' **Save Changes**/**Mark Active**/**Mark Inactive** look like they
+did nothing at all — the underlying save was working the whole time, only
+the confirmation was invisible. `alert(title, message?)` is a drop-in
+replacement: real `Alert.alert` on native (Expo Go), `window.alert` on web
+(every browser actually implements it). Fixed everywhere at once rather
+than per screen, including the `reportIfNotShared` warning above, which
+had the exact same problem — a real save failure would have alerted
+nothing on web either. Where a screen's feedback doesn't *need* to depend
+on an alert firing at all — Classes' Save Changes/Mark Active/Mark
+Inactive now derive their state directly from whether the form matches
+what's actually persisted (`isSaved` in `group/[id].tsx`, the same
+approach as the attendance screen's ✓ Saved button) and show a visible
+Active/Inactive badge on the screen itself — that's a strictly more
+reliable signal than any alert, web or native, and doesn't depend on the
+user noticing a dialog at all.
+
+**Mark Active/Mark Inactive is color-coded, not just re-labeled.** Both
+`group/[id].tsx` and `student/[id].tsx` give this button
+`variant={active ? 'danger' : 'primary'}` — red when the action will
+deactivate, green when it'll (re)activate — the same "color the button by
+which side of a two-way toggle is in play" convention the attendance
+screen already uses for Present (`primary`) vs. Absent (`danger`). A
+button's own color reads faster than its label text, especially at a
+glance across a list of students/classes.
 
 **Two mutating actions in the same tick can't clobber each other**, via a
 `dataRef` (a plain `useRef`, not `data` the state variable) that every
@@ -138,10 +182,61 @@ fix like this one. `serve.js` sends `Cache-Control: no-cache` on
 cache lifetimes only on the hashed, content-addressed JS/CSS bundle files
 (safe, since any code change gives them a new filename anyway).
 
+## Data storage: SQLite behind a decoupled module
+
+`server/db/store.js` is the *only* file `serve.js` imports for data access,
+and its whole surface is three functions: `getResource(resource)`,
+`setResource(resource, records)`, `close()`. Nothing above that line
+(`serve.js`, and by extension everything in `src/`, which only ever talks
+to `serve.js`'s `/api/<resource>` HTTP layer) knows or cares that the data
+lives in SQLite — it's just "ask the store for an array, or hand it a new
+one." That's what makes the backend swappable later without touching HTTP,
+auth, or any screen: a different backend is a new file next to
+`sqlite-store.js` implementing the same three functions, with `store.js`'s
+one-line `openStore` pointed at it instead.
+
+The current implementation, `server/db/sqlite-store.js`, uses Node's
+built-in `node:sqlite` (no extra native dependency to install or compile)
+— one file, `production/tutoring.db`. Rather than a table per resource
+with fixed columns, there's a single `records` table (`resource`, `id`,
+`seq`, `data` as a JSON string): the API's contract has always been "the
+client owns the shape, the server just persists whatever JSON array it's
+given" (see `serve.test.js`'s round-trip tests, which POST arbitrary
+shapes), and a fixed-column schema would quietly break that. `seq`
+preserves save order, since array order is what the UI renders in and a
+SQL table has no order of its own.
+
+**Migrating from the old one-JSON-file-per-resource layout is automatic
+and one-time.** If `sqlite-store.js` opens a folder that has no
+`tutoring.db` yet but does have the old `students.json`/`classes.json`/etc.
+sitting in it, it imports them into the new database on that first open —
+`npm run serve` just picks up right where it left off, nothing to run by
+hand. The original `.json` files are never deleted or modified, only ever
+read once — an extra safety copy sits there afterward, doing no harm.
+
+**Automatic backups moved into the store itself**, not `serve.js` — same
+reasoning as the rest of this module boundary: `serve.js` shouldn't need to
+know backups exist any more than it needs to know SQLite does. Every
+`setResource` call snapshots the whole `tutoring.db` file as it stood
+immediately before, via `node:sqlite`'s `backup()` (a safe, consistent
+hot-copy, even mid-write), into `production/backups/<timestamp>.db`
+(best-effort, never blocks the actual save; skipped on the very first
+write ever, since there's nothing yet to snapshot; the oldest beyond the
+most recent ~200 get pruned). This exists because real user data was lost
+once — testing directly against the live data file, then deleting it
+during cleanup — and needed to be recovered from a browser's local
+storage. **`production/` is never to be used for testing, ever** — point
+`server/serve.js` at a different folder via the `TUTORING_DATA_DIR`
+environment variable for anything experimental instead; every test in this
+repo does.
+
 ## Data model
 
-Five files in `production/`, each a plain JSON array, related to each
-other by id fields rather than by nesting:
+Logically, still the same five arrays as before — `getResource`/
+`setResource`'s `resource` argument is one of `students`, `classes`,
+`attendance`, `makeup`, `payments` — related to each other by id fields
+rather than by nesting. What changed is only *where* those arrays are
+persisted (`production/tutoring.db`, above), not their shape:
 
 ```mermaid
 erDiagram
@@ -195,35 +290,25 @@ erDiagram
     }
 ```
 
-`production/students.json`, `classes.json`, `attendance.json`,
-`makeup.json`, and `payments.json` are each exactly one of the arrays
-above, and that's the entire "schema" — no ORM, no migrations. In memory
-(`src/data/store.tsx`), attendance + makeup are combined into one
+`resource`s `students`, `classes`, `attendance`, `makeup`, and `payments`
+are each exactly one of the arrays above, and that's the entire "schema" —
+no ORM, no migrations beyond the one-time SQLite move described above. In
+memory (`src/data/store.tsx`), attendance + makeup are combined into one
 `sessions` list for convenience (the calendar/billing logic doesn't care
-which file a record came from, only its `isMakeup` flag, which still
+which resource a record came from, only its `isMakeup` flag, which still
 exists on the shared `SessionRecord` type in
 [`src/data/types.ts`](./src/data/types.ts)) — persisting always splits
 them back apart by that same flag before writing.
 
-**Automatic backups.** Every write to any of these files snapshots the
-*entire* `production/` folder as it stood immediately before, into
-`production/backups/<timestamp>/` (best-effort, never blocks the actual
-save; the oldest snapshots beyond the most recent ~200 get pruned). This
-exists because real user data was lost once — testing directly against the
-live data file, then deleting it during cleanup — and needed to be
-recovered from a browser's local storage. **`production/` is never to be
-used for testing, ever** — point `server/serve.js` at a different folder
-via the `TUTORING_DATA_DIR` environment variable for anything experimental
-instead.
-
-**Off-machine backups.** `production/backups/` above is same-machine only
-— it protects against a bad write, not against this Mac itself failing.
-`server/backup.sh` (`npm run backup`) is the separate, off-machine answer:
-tars up the five current data files (not the on-disk `backups/` history —
-that's the same-machine net, this is the off-machine one), encrypts it with
-`openssl enc -aes-256-cbc -pbkdf2` using a passphrase typed interactively
-(never stored anywhere — openssl's own prompt, hidden input, typed twice),
-and writes the result to `~/Documents/TutoringTrackerBackups/`.
+**Off-machine backups.** `production/backups/` (above) is same-machine
+only — it protects against a bad write, not against this Mac itself
+failing. `server/backup.sh` (`npm run backup`) is the separate,
+off-machine answer: tars up `production/` (not the on-disk `backups/`
+history — that's the same-machine net, this is the off-machine one),
+encrypts it with `openssl enc -aes-256-cbc -pbkdf2` using a passphrase
+typed interactively (never stored anywhere — openssl's own prompt, hidden
+input, typed twice), and writes the result to
+`~/Documents/TutoringTrackerBackups/`.
 
 Getting it into Google Drive is a real API upload, not just a synced
 folder: `server/gdrive-auth.js` (`npm run gdrive-auth`, one-time) runs a
@@ -417,15 +502,29 @@ projects, configured in `package.json`'s `"jest"` field:
   standing regression test that the not-yet-saved Payment id stays
   deterministic across repeated calls (see "why the Payment id is
   deterministic" above — this is the exact bug that test would have caught).
-- **`server`** (`server/__tests__/`, plain Node) — spawns the real
-  `server/serve.js` as a subprocess against a throwaway `TUTORING_DATA_DIR`
-  and a random port, then drives it over real HTTP: token auth (header,
-  query param, cookie, wrong token), every `/api/<resource>` endpoint
-  (empty-start, shape validation, round-tripping, cross-resource
-  isolation), the automatic-backup-before-write behavior, and the
-  cache-control headers on `index.html` vs. hashed assets vs. the API.
+  `src/utils/__tests__/alert.test.ts` is a similarly direct regression test
+  for the `Alert.alert`-is-a-no-op-on-web bug above — it mocks
+  `Platform.OS = 'web'` and asserts `window.alert` actually gets called
+  (and that the real `Alert.alert` doesn't, on web).
+- **`server`** (`server/**/__tests__/`, plain Node) — two layers:
+  - `server/db/__tests__/sqlite-store.test.js` unit-tests the store module
+    directly (no HTTP): round-tripping, whole-array replace semantics,
+    cross-resource isolation, arbitrary/unknown-shaped records, the
+    automatic-backup-before-write behavior (including that it's skipped on
+    the very first write), and the legacy JSON migration (imports once,
+    never re-imports over real changes, tolerates a corrupt/empty legacy
+    file without failing to start).
+  - `server/__tests__/serve.test.js` spawns the real `server/serve.js` as a
+    subprocess against a throwaway `TUTORING_DATA_DIR` and a random port,
+    then drives it over real HTTP: token auth (header, query param,
+    cookie, wrong token), every `/api/<resource>` endpoint (empty-start,
+    shape validation, round-tripping, cross-resource isolation), the
+    same backup behavior as seen from the outside (an HTTP write), and the
+    cache-control headers on `index.html` vs. hashed assets vs. the API.
+
   Every test file that touches data uses `TUTORING_DATA_DIR` (or the
-  mocked storage module, for the `app` project) — **never** `production/`.
+  mocked storage module, for the `app` project, or its own `mkdtemp`
+  scratch folder, for the store unit tests) — **never** `production/`.
   This is a direct response to the incident where real data got
   overwritten by hand-testing against the live file: nothing here can ever
   touch real user data, by construction, not by discipline.

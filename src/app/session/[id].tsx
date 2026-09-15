@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
 
 import { MakeupForm, MakeupSelection } from '@/components/makeup-form';
 import { RescheduleForm } from '@/components/reschedule-form';
@@ -11,6 +11,7 @@ import { Screen } from '@/components/ui/screen';
 import { formatDateLabel, formatTime, fromDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { AttendanceStatus, Student } from '@/data/types';
+import { alert } from '@/utils/alert';
 
 /** Key-order-independent comparison -- draft and a persisted record's
  * attendance map can list the same entries in different orders. */
@@ -82,14 +83,14 @@ export default function SessionScreen() {
     });
     const name = studentName(makeupFor);
     setMakeupFor(null);
-    Alert.alert('Makeup scheduled', `${name} is scheduled for ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
+    alert('Makeup scheduled', `${name} is scheduled for ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
   };
 
   const confirmReschedule = (studentIds: string[], selection: MakeupSelection) => {
     rescheduleStudents({ source: occurrence, studentIds, ...selection });
     const names = studentIds.map(studentName).join(' and ');
     setReschedulingOpen(false);
-    Alert.alert('Rescheduled', `${names} moved to ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
+    alert('Rescheduled', `${names} moved to ${formatDateLabel(selection.date)} at ${formatTime(selection.startTime)}.`);
   };
 
   return (
