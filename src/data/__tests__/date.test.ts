@@ -6,6 +6,8 @@ import {
   formatTime,
   fromDateKey,
   monthKeyLabel,
+  monthKeysInRange,
+  monthRangeLabel,
   nextOccurrenceOnOrAfter,
   startOfWeek,
   toDateKey,
@@ -104,5 +106,46 @@ describe('dateInMonth', () => {
 describe('formatDateLabel', () => {
   it('produces a human label containing the day', () => {
     expect(formatDateLabel('2026-09-07')).toContain('7');
+  });
+});
+
+describe('monthKeysInRange', () => {
+  it('returns just the one month when from and to are the same', () => {
+    expect(monthKeysInRange('2026-09', '2026-09')).toEqual(['2026-09']);
+  });
+
+  it('returns every month in between, oldest first', () => {
+    expect(monthKeysInRange('2026-07', '2026-09')).toEqual(['2026-07', '2026-08', '2026-09']);
+  });
+
+  it('rolls over a year boundary', () => {
+    expect(monthKeysInRange('2026-11', '2027-02')).toEqual(['2026-11', '2026-12', '2027-01', '2027-02']);
+  });
+
+  it('works when given backwards (to before from)', () => {
+    expect(monthKeysInRange('2026-09', '2026-07')).toEqual(['2026-07', '2026-08', '2026-09']);
+  });
+});
+
+describe('monthRangeLabel', () => {
+  it('is the same as monthKeyLabel for a single month', () => {
+    expect(monthRangeLabel('2026-09', '2026-09')).toBe(monthKeyLabel('2026-09'));
+  });
+
+  it('names the month once and the year once when both ends share a year', () => {
+    const label = monthRangeLabel('2026-07', '2026-09');
+    expect(label).toContain('July');
+    expect(label).toContain('September 2026');
+    expect(label).not.toContain('July 2026'); // year shown only at the end
+  });
+
+  it('spells out both months in full when the range crosses a year boundary', () => {
+    const label = monthRangeLabel('2026-12', '2027-02');
+    expect(label).toContain('December 2026');
+    expect(label).toContain('February 2027');
+  });
+
+  it('is order-independent, same as monthKeysInRange', () => {
+    expect(monthRangeLabel('2026-09', '2026-07')).toBe(monthRangeLabel('2026-07', '2026-09'));
   });
 });

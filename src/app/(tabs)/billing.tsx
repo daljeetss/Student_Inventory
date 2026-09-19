@@ -5,15 +5,16 @@ import { ThemedText } from '@/components/themed-text';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ChipSelect } from '@/components/ui/chip-select';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
 import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
-import { addMonths, formatTime, monthKeyLabel, toMonthKey } from '@/data/date';
+import { addMonths, monthRangeLabel, formatTime, toMonthKey } from '@/data/date';
 import { groupStudentsBySchedule } from '@/data/schedule-grouping';
-import { BillingRow, useAppData } from '@/data/store';
+import { RangeBillingRow, useAppData } from '@/data/store';
 import { PaymentStatus } from '@/data/types';
 import { alert } from '@/utils/alert';
-import { buildDueMessage } from '@/data/whatsapp';
+import { buildDueMessageForRange } from '@/data/whatsapp';
 
 const STATUS_TONE: Record<PaymentStatus, 'primary' | 'warning' | 'danger'> = {
   paid: 'primary',
@@ -27,23 +28,35 @@ const STATUS_LABEL: Record<PaymentStatus, string> = {
   unpaid: 'Unpaid',
 };
 
+// '1' (the default) is a plain single month -- everything below degenerates
+// back to exactly today's single-month behavior in that case.
+const RANGE_OPTIONS: { value: string; label: string }[] = [
+  { value: '1', label: '1 month' },
+  { value: '2', label: '2 months' },
+  { value: '3', label: '3 months' },
+  { value: '6', label: '6 months' },
+  { value: '12', label: '12 months' },
+];
+
 interface BillingRowCardProps {
-  row: BillingRow;
-  monthKey: string;
+  row: RangeBillingRow;
+  fromMonthKey: string;
+  toMonthKey: string;
   partialFor: string | null;
   partialAmount: string;
-  onMarkPaidInFull: (row: BillingRow) => void;
-  onMarkUnpaid: (row: BillingRow) => void;
+  onMarkPaidInFull: (row: RangeBillingRow) => void;
+  onMarkUnpaid: (row: RangeBillingRow) => void;
   onStartPartial: (studentId: string) => void;
   onChangePartialAmount: (text: string) => void;
   onCancelPartial: () => void;
-  onSubmitPartial: (row: BillingRow) => void;
-  onMessageSent: (paymentId: string) => void;
+  onSubmitPartial: (row: RangeBillingRow) => void;
+  onMessageSent: (row: RangeBillingRow) => void;
 }
 
 function BillingRowCard({
   row,
-  monthKey,
+  fromMonthKey,
+  toMonthKey,
   partialFor,
   partialAmount,
   onMarkPaidInFull,
@@ -54,45 +67,55 @@ function BillingRowCard({
   onSubmitPartial,
   onMessageSent,
 }: BillingRowCardProps) {
+  // The most recent reminder across every month in the range, if any --
+  // there's no single "the" payment once this spans multiple months.
+  const lastMessageSentAt = row.monthRows
+    .map((r) => r.payment.messageSentAt)
+    .filter((d): d is string => !!d)
+    .sort()
+    .at(-1);
+
   return (
     <Card>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         <ThemedText type="smallBold">{row.student.name}</ThemedText>
-        <Badge label={STATUS_LABEL[row.payment.status]} tone={STATUS_TONE[row.payment.status]} />
+        <Badge label={STATUS_LABEL[row.status]} tone={STATUS_TONE[row.status]} />
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        {row.sessionsAttended} session{row.sessionsAttended === 1 ? '' : 's'} × ${row.student.ratePerSession.toFixed(2)} = $
-        {row.amountDue.toFixed(2)}
+        {row.totalSessionsAttended} session{row.totalSessionsAttended === 1 ? '' : 's'} × $
+        {row.student.ratePerSession.toFixed(2)} = ${row.totalAmountDue.toFixed(2)}
       </ThemedText>
-      {row.payment.amountPaid > 0 && (
+      {row.totalAmountPaid > 0 && (
         <ThemedText type="small" themeColor="textSecondary">
-          Paid so far: ${row.payment.amountPaid.toFixed(2)}
+          Paid so far: ${row.totalAmountPaid.toFixed(2)}
         </ThemedText>
       )}
-      {row.payment.messageSentAt && (
+      {lastMessageSentAt && (
         <ThemedText type="small" themeColor="textSecondary">
-          Reminder sent {new Date(row.payment.messageSentAt).toLocaleDateString()}
+          Reminder sent {new Date(lastMessageSentAt).toLocaleDateString()}
         </ThemedText>
       )}
 
-      {row.amountDue === 0 ? (
+      {row.totalAmountDue === 0 ? (
         <ThemedText type="small" themeColor="textSecondary">
-          Nothing due this month — no reminder or payment actions needed.
+          Nothing due for this period — no reminder or payment actions needed.
         </ThemedText>
       ) : (
         <>
           <WhatsAppSendButton
             students={[row.student]}
-            buildMessage={() => buildDueMessage(row.student, monthKey, row.sessionsAttended, row.amountDue)}
-            onSent={() => onMessageSent(row.payment.id)}
+            buildMessage={() =>
+              buildDueMessageForRange(row.student, fromMonthKey, toMonthKey, row.totalSessionsAttended, row.totalAmountDue)
+            }
+            onSent={() => onMessageSent(row)}
           />
           <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-            {row.payment.status !== 'paid' && (
+            {row.status !== 'paid' && (
               <View style={{ flex: 1, minWidth: 140 }}>
                 <Button title="Mark Paid in Full" variant="secondary" onPress={() => onMarkPaidInFull(row)} />
               </View>
             )}
-            {row.payment.status !== 'unpaid' && (
+            {row.status !== 'unpaid' && (
               <View style={{ flex: 1, minWidth: 140 }}>
                 <Button title="Mark Unpaid" variant="ghost" onPress={() => onMarkUnpaid(row)} />
               </View>
@@ -122,34 +145,42 @@ function BillingRowCard({
 }
 
 export default function BillingScreen() {
-  const { data, getMonthlyBilling, recordPayment, markMessageSent } = useAppData();
+  const { data, getBillingForRange, recordRangePayment, markRangeMessageSent } = useAppData();
+  // `monthKey` is the anchor/end month -- Prev/Next always moves it one
+  // month at a time, exactly like before, whether or not months are
+  // combined. `rangeMonths` (default '1', i.e. no combining) controls how
+  // many months, ending at `monthKey`, are totaled together.
   const [monthKey, setMonthKey] = useState(toMonthKey(new Date()));
+  const [rangeMonths, setRangeMonths] = useState(['1']);
   const [partialFor, setPartialFor] = useState<string | null>(null);
   const [partialAmount, setPartialAmount] = useState('');
 
-  const rows = getMonthlyBilling(monthKey);
-  const rowByStudentId = new Map(rows.map((r) => [r.student.id, r]));
-  const totalDue = rows.reduce((sum, r) => sum + (r.payment.status === 'paid' ? 0 : r.amountDue - r.payment.amountPaid), 0);
+  const fromMonthKey = addMonths(monthKey, -(Number(rangeMonths[0]) - 1));
+  const rangeLabel = monthRangeLabel(fromMonthKey, monthKey);
 
-  // Billing only ever covers active students (getMonthlyBilling already
+  const rows = getBillingForRange(fromMonthKey, monthKey);
+  const rowByStudentId = new Map(rows.map((r) => [r.student.id, r]));
+  const totalDue = rows.reduce((sum, r) => sum + (r.status === 'paid' ? 0 : r.totalAmountDue - r.totalAmountPaid), 0);
+
+  // Billing only ever covers active students (getBillingForRange already
   // filters to them), so the grouping's "inactive" bucket never applies
   // here -- only day/class sections and "no class scheduled".
   const { days, unscheduled } = groupStudentsBySchedule(data.students, data.groups);
 
-  const markPaidInFull = (row: BillingRow) => recordPayment(row.payment.id, row.amountDue, 'paid');
-  const markUnpaid = (row: BillingRow) => recordPayment(row.payment.id, 0, 'unpaid');
+  const markPaidInFull = (row: RangeBillingRow) => recordRangePayment(row.student.id, fromMonthKey, monthKey, 0, 'full');
+  const markUnpaid = (row: RangeBillingRow) => recordRangePayment(row.student.id, fromMonthKey, monthKey, 0, 'unpaid');
 
-  const submitPartial = (row: BillingRow) => {
+  const submitPartial = (row: RangeBillingRow) => {
     const amount = Number(partialAmount);
     if (Number.isNaN(amount) || amount <= 0) return alert('Enter a valid amount');
-    const status: PaymentStatus = amount >= row.amountDue ? 'paid' : 'partially-paid';
-    recordPayment(row.payment.id, amount, status);
+    recordRangePayment(row.student.id, fromMonthKey, monthKey, amount, 'partial');
     setPartialFor(null);
     setPartialAmount('');
   };
 
   const cardProps = {
-    monthKey,
+    fromMonthKey,
+    toMonthKey: monthKey,
     partialFor,
     partialAmount,
     onMarkPaidInFull: markPaidInFull,
@@ -161,7 +192,7 @@ export default function BillingScreen() {
     onChangePartialAmount: setPartialAmount,
     onCancelPartial: () => setPartialFor(null),
     onSubmitPartial: submitPartial,
-    onMessageSent: markMessageSent,
+    onMessageSent: (row: RangeBillingRow) => markRangeMessageSent(row.student.id, fromMonthKey, monthKey),
   };
 
   return (
@@ -176,7 +207,7 @@ export default function BillingScreen() {
             ← Prev
           </ThemedText>
         </Pressable>
-        <ThemedText type="smallBold">{monthKeyLabel(monthKey)}</ThemedText>
+        <ThemedText type="smallBold">{rangeLabel}</ThemedText>
         <Pressable onPress={() => setMonthKey((m) => addMonths(m, 1))} hitSlop={12}>
           <ThemedText type="smallBold" themeColor="primary">
             Next →
@@ -184,8 +215,15 @@ export default function BillingScreen() {
         </Pressable>
       </View>
 
+      <View style={{ gap: 6 }}>
+        <ThemedText type="small" themeColor="textSecondary">
+          Combine months
+        </ThemedText>
+        <ChipSelect options={RANGE_OPTIONS} value={rangeMonths} onChange={setRangeMonths} />
+      </View>
+
       <Card>
-        <ThemedText type="smallBold">Outstanding this month: ${totalDue.toFixed(2)}</ThemedText>
+        <ThemedText type="smallBold">Outstanding for {rangeLabel}: ${totalDue.toFixed(2)}</ThemedText>
       </Card>
 
       {rows.length === 0 && <ThemedText themeColor="textSecondary">No active students yet.</ThemedText>}
@@ -198,7 +236,7 @@ export default function BillingScreen() {
             {day.dayName}
           </ThemedText>
           {day.classes.map((cls) => {
-            const classRows = cls.students.map((s) => rowByStudentId.get(s.id)).filter((r): r is BillingRow => !!r);
+            const classRows = cls.students.map((s) => rowByStudentId.get(s.id)).filter((r): r is RangeBillingRow => !!r);
             if (classRows.length === 0) return null;
             return (
               <View key={`${day.dayOfWeek}_${cls.group.id}_${cls.startTime}`} style={{ gap: 8 }}>
@@ -218,7 +256,7 @@ export default function BillingScreen() {
 
       {unscheduled.length > 0 &&
         (() => {
-          const unscheduledRows = unscheduled.map((s) => rowByStudentId.get(s.id)).filter((r): r is BillingRow => !!r);
+          const unscheduledRows = unscheduled.map((s) => rowByStudentId.get(s.id)).filter((r): r is RangeBillingRow => !!r);
           if (unscheduledRows.length === 0) return null;
           return (
             <View style={{ gap: 10 }}>

@@ -1,4 +1,4 @@
-import { buildClassReminderMessage, buildDueMessage, normalizePhone } from '@/data/whatsapp';
+import { buildClassReminderMessage, buildDueMessage, buildDueMessageForRange, normalizePhone } from '@/data/whatsapp';
 import { Student } from '@/data/types';
 
 const student: Student = {
@@ -35,6 +35,22 @@ describe('buildDueMessage', () => {
     const msg = buildDueMessage(student, '2026-08', 1, 40);
     expect(msg).toContain('1 session ');
     expect(msg).not.toContain('1 sessions');
+  });
+});
+
+describe('buildDueMessageForRange', () => {
+  it('names the combined range and the combined total', () => {
+    const msg = buildDueMessageForRange(student, '2026-07', '2026-09', 9, 360);
+    expect(msg).toContain('Priya');
+    expect(msg).toContain('Ava');
+    expect(msg).toContain('July');
+    expect(msg).toContain('September 2026');
+    expect(msg).toContain('$360.00');
+    expect(msg).toContain('9 sessions');
+  });
+
+  it('reads identically to buildDueMessage for a single-month "range"', () => {
+    expect(buildDueMessageForRange(student, '2026-08', '2026-08', 3, 120)).toBe(buildDueMessage(student, '2026-08', 3, 120));
   });
 });
 

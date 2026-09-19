@@ -589,5 +589,122 @@ describe('AppDataProvider / useAppData', () => {
       const row = result.current.getMonthlyBilling('2026-09')[0];
       expect(row.payment.messageSentAt).toBeTruthy();
     });
+
+    // Billing's "combine months" feature: totals a student's billing across
+    // several months at once instead of just the one currently selected.
+    describe('range billing (combine months)', () => {
+      // Builds on setupBillingScenario (2 present Tuesdays in September --
+      // $80 due) and adds one more present Tuesday the following month
+      // (Oct 6 2026, same weekly Tuesday Group) -- $40 due in October.
+      async function setupTwoMonthBillingScenario() {
+        const rendered = await setupBillingScenario();
+        const { result, student } = rendered;
+        const octOcc = result.current.getOccurrencesForDate(new Date(2026, 9, 6))[0];
+        await act(async () => {
+          result.current.saveAttendance(octOcc, { [student.id]: 'present' });
+        });
+        return rendered;
+      }
+
+      it('totals sessions/amount across every month in the range', async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+        const rows = result.current.getBillingForRange('2026-09', '2026-10');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].student.id).toBe(student.id);
+        expect(rows[0].monthKeys).toEqual(['2026-09', '2026-10']);
+        expect(rows[0].totalSessionsAttended).toBe(3);
+        expect(rows[0].totalAmountDue).toBe(120);
+        expect(rows[0].totalAmountPaid).toBe(0);
+        expect(rows[0].status).toBe('unpaid');
+        expect(rows[0].monthRows.map((r) => r.amountDue)).toEqual([80, 40]);
+      });
+
+      it('degenerates to the same numbers as getMonthlyBilling for a single-month range', async () => {
+        const { result } = await setupTwoMonthBillingScenario();
+        const single = result.current.getMonthlyBilling('2026-09')[0];
+        const range = result.current.getBillingForRange('2026-09', '2026-09')[0];
+        expect(range.totalSessionsAttended).toBe(single.sessionsAttended);
+        expect(range.totalAmountDue).toBe(single.amountDue);
+        expect(range.status).toBe(single.payment.status);
+      });
+
+      it('works given the months backwards, same as monthKeysInRange', async () => {
+        const { result } = await setupTwoMonthBillingScenario();
+        const forwards = result.current.getBillingForRange('2026-09', '2026-10')[0];
+        const backwards = result.current.getBillingForRange('2026-10', '2026-09')[0];
+        expect(backwards.totalAmountDue).toBe(forwards.totalAmountDue);
+        expect(backwards.monthKeys).toEqual(forwards.monthKeys);
+      });
+
+      it("recordRangePayment 'full' pays every month in the range in one go", async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-09', '2026-10', 0, 'full');
+        });
+
+        expect(result.current.getMonthlyBilling('2026-09')[0].payment).toMatchObject({ status: 'paid', amountPaid: 80 });
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment).toMatchObject({ status: 'paid', amountPaid: 40 });
+        const range = result.current.getBillingForRange('2026-09', '2026-10')[0];
+        expect(range.status).toBe('paid');
+        expect(range.totalAmountPaid).toBe(120);
+      });
+
+      it("recordRangePayment 'partial' allocates the amount oldest-month-first, like paying down a running tab", async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+
+        // $100 against Sept's $80 + Oct's $40: fully covers September,
+        // leaves $20 of October's $40 still outstanding.
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-09', '2026-10', 100, 'partial');
+        });
+
+        const sept = result.current.getMonthlyBilling('2026-09')[0].payment;
+        const oct = result.current.getMonthlyBilling('2026-10')[0].payment;
+        expect(sept).toMatchObject({ status: 'paid', amountPaid: 80 });
+        expect(oct).toMatchObject({ status: 'partially-paid', amountPaid: 20 });
+
+        const range = result.current.getBillingForRange('2026-09', '2026-10')[0];
+        expect(range.status).toBe('partially-paid');
+        expect(range.totalAmountPaid).toBe(100);
+      });
+
+      it("recordRangePayment 'unpaid' resets every month in the range", async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-09', '2026-10', 0, 'full');
+        });
+
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-09', '2026-10', 0, 'unpaid');
+        });
+
+        expect(result.current.getMonthlyBilling('2026-09')[0].payment).toMatchObject({ status: 'unpaid', amountPaid: 0 });
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment).toMatchObject({ status: 'unpaid', amountPaid: 0 });
+      });
+
+      it('markRangeMessageSent stamps every month in the range, not just one', async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+
+        await act(async () => {
+          result.current.markRangeMessageSent(student.id, '2026-09', '2026-10');
+        });
+
+        expect(result.current.getMonthlyBilling('2026-09')[0].payment.messageSentAt).toBeTruthy();
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment.messageSentAt).toBeTruthy();
+      });
+
+      it("doesn't touch a month outside the requested range", async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+
+        await act(async () => {
+          // Only September -- October should be left alone.
+          result.current.recordRangePayment(student.id, '2026-09', '2026-09', 0, 'full');
+        });
+
+        expect(result.current.getMonthlyBilling('2026-09')[0].payment.status).toBe('paid');
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment.status).toBe('unpaid');
+      });
+    });
   });
 });

@@ -38,6 +38,35 @@ export function addMonths(monthKey: string, delta: number): string {
   return toMonthKey(d);
 }
 
+/** Every month key from `from` to `to`, inclusive, oldest first -- swaps
+ * them first if given backwards, so a range picker never has to worry
+ * about which end the user last moved. */
+export function monthKeysInRange(from: string, to: string): string[] {
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  const keys: string[] = [];
+  for (let cursor = start; cursor <= end; cursor = addMonths(cursor, 1)) {
+    keys.push(cursor);
+  }
+  return keys;
+}
+
+/** "September 2026" for a single month (same as monthKeyLabel), or
+ * "July – September 2026" / "December 2026 – February 2027" for a real
+ * range -- only spelling out the year twice when it actually changes. */
+export function monthRangeLabel(from: string, to: string): string {
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  if (start === end) return monthKeyLabel(start);
+
+  const startYear = start.split('-')[0];
+  const endYear = end.split('-')[0];
+  if (startYear === endYear) {
+    const [y, m] = start.split('-').map(Number);
+    const startMonthName = new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: 'long' });
+    return `${startMonthName} – ${monthKeyLabel(end)}`;
+  }
+  return `${monthKeyLabel(start)} – ${monthKeyLabel(end)}`;
+}
+
 export function addDays(d: Date, days: number): Date {
   const copy = new Date(d);
   copy.setDate(copy.getDate() + days);

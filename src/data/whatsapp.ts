@@ -1,6 +1,6 @@
 import { Linking } from 'react-native';
 
-import { monthKeyLabel } from '@/data/date';
+import { monthKeyLabel, monthRangeLabel } from '@/data/date';
 import { Student } from '@/data/types';
 
 export function buildDueMessage(
@@ -12,6 +12,24 @@ export function buildDueMessage(
   const monthLabel = monthKeyLabel(monthKey);
   return (
     `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${monthLabel} ` +
+    `is $${amountDue.toFixed(2)} (${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'} x ` +
+    `$${student.ratePerSession.toFixed(2)}). Thank you!`
+  );
+}
+
+/** Same message as buildDueMessage, for a combined multiple-months total
+ * (Billing's "combine months" mode) -- degenerates to the exact same text
+ * as buildDueMessage when `fromMonthKey`/`toMonthKey` are the same month. */
+export function buildDueMessageForRange(
+  student: Student,
+  fromMonthKey: string,
+  toMonthKey: string,
+  sessionsAttended: number,
+  amountDue: number,
+): string {
+  const label = monthRangeLabel(fromMonthKey, toMonthKey);
+  return (
+    `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${label} ` +
     `is $${amountDue.toFixed(2)} (${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'} x ` +
     `$${student.ratePerSession.toFixed(2)}). Thank you!`
   );

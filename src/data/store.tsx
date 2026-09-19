@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
-import { toDateKey, toMonthKey } from '@/data/date';
+import { monthKeysInRange, toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
 import { getItem, setItem } from '@/data/storage';
 import {
@@ -82,6 +82,25 @@ interface AppDataContextValue {
   getMonthlyBilling: (monthKey: string) => BillingRow[];
   recordPayment: (paymentId: string, amountPaid: number, status: PaymentStatus) => void;
   markMessageSent: (paymentId: string) => void;
+
+  /** Same idea as getMonthlyBilling, but totaled across every month from
+   * `fromMonthKey` to `toMonthKey` inclusive (order doesn't matter -- see
+   * monthKeysInRange) -- Billing's "combine months" mode. Degenerates to
+   * the same numbers as getMonthlyBilling when both are the same month. */
+  getBillingForRange: (fromMonthKey: string, toMonthKey: string) => RangeBillingRow[];
+  /** Applies one payment action across every month in the range for one
+   * student, in one persisted write. 'full'/'unpaid' apply to every month
+   * in the range; 'partial' allocates `amountPaid` oldest-month-first
+   * against whatever's still outstanding, like paying down a running tab
+   * (any leftover past what's owed is simply not applied to anything). */
+  recordRangePayment: (
+    studentId: string,
+    fromMonthKey: string,
+    toMonthKey: string,
+    amountPaid: number,
+    mode: 'full' | 'partial' | 'unpaid',
+  ) => void;
+  markRangeMessageSent: (studentId: string, fromMonthKey: string, toMonthKey: string) => void;
 }
 
 export interface BillingRow {
@@ -89,6 +108,24 @@ export interface BillingRow {
   sessionsAttended: number;
   amountDue: number;
   payment: Payment;
+}
+
+export interface RangeBillingRow {
+  student: Student;
+  /** Oldest first -- see monthKeysInRange. */
+  monthKeys: string[];
+  /** One BillingRow per month in monthKeys, same order -- lets a screen
+   * show the per-month breakdown underneath the combined total if it wants
+   * to, without recomputing it itself. */
+  monthRows: BillingRow[];
+  totalSessionsAttended: number;
+  totalAmountDue: number;
+  totalAmountPaid: number;
+  /** Derived the same way a single month's Payment.status is: 'paid' once
+   * totalAmountPaid covers totalAmountDue (including the "nothing was ever
+   * due" case), 'partially-paid' once something's been paid but not
+   * enough, 'unpaid' otherwise. */
+  status: PaymentStatus;
 }
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
@@ -506,6 +543,101 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     [persistPayments, resolvePayment],
   );
 
+  const getBillingForRange = useCallback<AppDataContextValue['getBillingForRange']>(
+    (fromMonthKey, toMonthKeyArg) => {
+      const monthKeys = monthKeysInRange(fromMonthKey, toMonthKeyArg);
+      const perMonth = monthKeys.map((mk) => getMonthlyBilling(mk));
+
+      return data.students
+        .filter((s) => s.active)
+        .map((student) => {
+          // Every month's rows cover the exact same active students, in the
+          // same order (getMonthlyBilling always maps over the same
+          // data.students.filter(active)) -- found by id anyway, so this
+          // stays correct even if that ever changes.
+          const monthRows = perMonth.map((rows) => rows.find((r) => r.student.id === student.id)!);
+          const totalSessionsAttended = monthRows.reduce((sum, r) => sum + r.sessionsAttended, 0);
+          const totalAmountDue = monthRows.reduce((sum, r) => sum + r.amountDue, 0);
+          const totalAmountPaid = monthRows.reduce((sum, r) => sum + r.payment.amountPaid, 0);
+          const status: PaymentStatus =
+            totalAmountDue === 0 || totalAmountPaid >= totalAmountDue
+              ? 'paid'
+              : totalAmountPaid > 0
+                ? 'partially-paid'
+                : 'unpaid';
+
+          return { student, monthKeys, monthRows, totalSessionsAttended, totalAmountDue, totalAmountPaid, status };
+        });
+    },
+    [data.students, getMonthlyBilling],
+  );
+
+  /** Shared by recordRangePayment/markRangeMessageSent: every month-in-
+   * range Payment for one student, seeded from getMonthlyBilling (so an
+   * as-yet-unsaved month gets its deterministic snapshot, exactly like
+   * resolvePayment does for a single month) and merged into a full
+   * `payments` map keyed by id -- so callers can mutate just the rows they
+   * care about, then persist everything in ONE write instead of one write
+   * per month. */
+  const resolveRangePayments = useCallback(
+    (studentId: string, fromMonthKey: string, toMonthKey: string) => {
+      const rows = monthKeysInRange(fromMonthKey, toMonthKey)
+        .map((mk) => getMonthlyBilling(mk).find((r) => r.student.id === studentId))
+        .filter((r): r is BillingRow => !!r);
+      const byId = new Map(dataRef.current.payments.map((p) => [p.id, p]));
+      for (const row of rows) if (!byId.has(row.payment.id)) byId.set(row.payment.id, row.payment);
+      return { rows, byId };
+    },
+    [getMonthlyBilling],
+  );
+
+  const recordRangePayment = useCallback<AppDataContextValue['recordRangePayment']>(
+    (studentId, fromMonthKey, toMonthKey, amountPaid, mode) => {
+      const { rows, byId } = resolveRangePayments(studentId, fromMonthKey, toMonthKey);
+      const now = new Date().toISOString();
+      let remaining = amountPaid;
+
+      for (const row of rows) {
+        const current = byId.get(row.payment.id)!;
+        if (mode === 'unpaid') {
+          byId.set(current.id, { ...current, amountPaid: 0, status: 'unpaid', datePaid: undefined });
+        } else if (mode === 'full') {
+          byId.set(current.id, { ...current, amountPaid: current.amountDue, status: 'paid', datePaid: now });
+        } else {
+          // partial: pay down the oldest month's outstanding balance
+          // first, then the next, same as paying down a running tab.
+          const outstanding = current.amountDue - current.amountPaid;
+          if (outstanding <= 0 || remaining <= 0) continue;
+          const allocated = Math.min(outstanding, remaining);
+          remaining -= allocated;
+          const newAmountPaid = current.amountPaid + allocated;
+          byId.set(current.id, {
+            ...current,
+            amountPaid: newAmountPaid,
+            status: newAmountPaid >= current.amountDue ? 'paid' : 'partially-paid',
+            datePaid: now,
+          });
+        }
+      }
+
+      persistPayments(Array.from(byId.values()));
+    },
+    [persistPayments, resolveRangePayments],
+  );
+
+  const markRangeMessageSent = useCallback<AppDataContextValue['markRangeMessageSent']>(
+    (studentId, fromMonthKey, toMonthKey) => {
+      const { rows, byId } = resolveRangePayments(studentId, fromMonthKey, toMonthKey);
+      const now = new Date().toISOString();
+      for (const row of rows) {
+        const current = byId.get(row.payment.id)!;
+        byId.set(current.id, { ...current, messageSentAt: now });
+      }
+      persistPayments(Array.from(byId.values()));
+    },
+    [persistPayments, resolveRangePayments],
+  );
+
   const value = useMemo<AppDataContextValue>(
     () => ({
       data,
@@ -522,6 +654,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       getMonthlyBilling,
       recordPayment,
       markMessageSent,
+      getBillingForRange,
+      recordRangePayment,
+      markRangeMessageSent,
     }),
     [
       data,
@@ -538,6 +673,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       getMonthlyBilling,
       recordPayment,
       markMessageSent,
+      getBillingForRange,
+      recordRangePayment,
+      markRangeMessageSent,
     ],
   );
 

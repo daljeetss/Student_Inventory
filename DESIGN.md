@@ -477,6 +477,53 @@ so the save silently did nothing. Making the id a deterministic function of
 month's payment for a given student is called, whether or not it's been
 saved yet.
 
+### Combining months, without changing what a "month" is underneath
+
+Billing's per-month `Payment` model (above) doesn't change for the
+"combine months" feature — there's still exactly one `Payment` per
+`(studentId, monthKey)`, still deterministic, still created lazily. What's
+new is a second layer on top that totals several of those months together:
+
+- `monthKeysInRange(from, to)` (`src/data/date.ts`) — every month key from
+  `from` to `to` inclusive, oldest first, order-independent (swaps them
+  first if given backwards, so a UI never has to track which end the user
+  last moved).
+- `getBillingForRange(fromMonthKey, toMonthKey)` (`store.tsx`) — calls the
+  existing `getMonthlyBilling` once per month in the range and sums each
+  active student's sessions/amountDue/amountPaid across them into one
+  `RangeBillingRow`, with `status` derived the same way a single `Payment`'s
+  is (paid once the total's covered, partially-paid once something's been
+  paid but not enough, unpaid otherwise). A one-month range produces the
+  exact same numbers `getMonthlyBilling` would — Billing's default view
+  (see below) relies on that to stay unchanged.
+- `recordRangePayment(studentId, from, to, amountPaid, mode)` — applies one
+  action across every month in the range **in a single persisted write**
+  (collects every affected month's `Payment` — via the same lazy
+  not-yet-saved-snapshot logic as `resolvePayment` — into one map, mutates
+  just the ones in range, then calls `persistPayments` once, rather than
+  once per month). `mode: 'full'`/`'unpaid'` apply to every month in the
+  range uniformly; `'partial'` allocates the given amount **oldest-month-
+  first** against whatever's still outstanding on each — the same mental
+  model as paying down a running tab, so a lump-sum payment that doesn't
+  quite cover everything still lands somewhere sensible instead of, say,
+  being split evenly across months that don't need it yet.
+- `markRangeMessageSent(studentId, from, to)` — same idea, stamps
+  `messageSentAt` on every month's payment in the range.
+
+Billing (`(tabs)/billing.tsx`) keeps its existing `monthKey` state as the
+*anchor* (the end of the range) — **← Prev**/**Next →** still move it one
+month at a time exactly as before, so that part of the UI is completely
+unchanged. A new `rangeMonths` chip-select (`1`/`2`/`3`/`6`/`12`, default
+`1`) picks how many months, ending at `monthKey`, get combined —
+`fromMonthKey = addMonths(monthKey, -(rangeMonths - 1))`. The screen always
+renders through `getBillingForRange`/`RangeBillingRow` now, never
+`getMonthlyBilling`/`BillingRow` directly — the `rangeMonths === 1` default
+case takes the exact same code path as every other range, it just happens
+to be a range of one month, which is what makes "shows the current month
+by default, move month by month" (unchanged) and "combine multiple months"
+(new) the same feature at two different widths instead of two separate
+implementations to keep in sync.
+
 ## WhatsApp reminders
 
 There's no WhatsApp API integration — `src/data/whatsapp.ts` builds a
@@ -498,10 +545,13 @@ projects, configured in `package.json`'s `"jest"` field:
   (`src/data/storage.ts` is mocked with an in-memory stand-in — reset
   between every test — so nothing touches the network or the filesystem).
   This is where the trickiest logic lives: virtual-vs-persisted session
-  occurrences, makeup linking + `needsMakeup`, monthly billing math, and a
-  standing regression test that the not-yet-saved Payment id stays
-  deterministic across repeated calls (see "why the Payment id is
-  deterministic" above — this is the exact bug that test would have caught).
+  occurrences, makeup linking + `needsMakeup`, monthly billing math, the
+  "combine months" range-billing math (totals across months, oldest-month-
+  first partial-payment allocation, and that a single-month range produces
+  identical numbers to the plain per-month path), and a standing regression
+  test that the not-yet-saved Payment id stays deterministic across
+  repeated calls (see "why the Payment id is deterministic" above — this
+  is the exact bug that test would have caught).
   `src/utils/__tests__/alert.test.ts` is a similarly direct regression test
   for the `Alert.alert`-is-a-no-op-on-web bug above — it mocks
   `Platform.OS = 'web'` and asserts `window.alert` actually gets called

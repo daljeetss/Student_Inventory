@@ -114,12 +114,21 @@ while using the app.
   can each be messaged in a couple of taps instead of one at a time. The
   same button is on the **Classes** tab too, for reminding about a
   recurring class in general rather than one specific day.
-- **Billing** — pick a month; it totals each student's attended sessions
-  (regular + makeup) × their rate. Tap **Send via WhatsApp** to see the
-  pre-filled reminder message before it goes anywhere — edit it if you
+- **Billing** — defaults to the current month, moved one month at a time
+  with **← Prev**/**Next →**; it totals each student's attended sessions
+  (regular + makeup) × their rate. To bill several months together instead
+  (e.g. someone hasn't paid in a while), tap **2 months**/**3**/**6**/**12**
+  under "Combine months" — the totals, WhatsApp reminder, and payment
+  actions below all combine across that many months ending at whichever
+  one Prev/Next is currently on; switch back to **1 month** any time to
+  return to the plain single-month view. Tap **Send via WhatsApp** to see
+  the pre-filled reminder message before it goes anywhere — edit it if you
   want, then send when you're ready. Mark payments as paid in full,
-  partial, or unpaid as money comes in. A student with nothing due that
-  month shows no reminder/payment actions at all.
+  partial, or unpaid as money comes in — in combined mode this applies
+  across every month in the range in one go (a partial payment pays down
+  the oldest month first, then the next, like paying down a running tab).
+  A student with nothing due for the selected period shows no
+  reminder/payment actions at all.
 
 **Where the data lives depends on how you're running it:**
 - Via `npm run serve` (recommended, see below) — all data lives in one
