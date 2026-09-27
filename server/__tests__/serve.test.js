@@ -119,141 +119,129 @@ describe('icons', () => {
   });
 });
 
-describe('per-resource data endpoints', () => {
-  const resources = ['students', 'classes', 'attendance', 'makeup', 'payments'];
+describe('data endpoints', () => {
+  const resources = ['students', 'classes', 'sessions', 'payments'];
+  const api = (p, init = {}) =>
+    fetch(`${baseUrl}/api/${p}`, { ...init, headers: authHeaders({ 'Content-Type': 'application/json' }) });
+  const put = (resource, id, record, baseVersion) =>
+    api(`${resource}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ record, baseVersion }) });
+  const del = (resource, id, baseVersion) =>
+    api(`${resource}/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ baseVersion }) });
+  const list = async (resource) => (await api(resource)).json();
+
+  const student = (id, extra = {}) => ({
+    id,
+    name: `Student ${id}`,
+    grade: '3',
+    parentName: 'Priya',
+    parentPhone: '15551234567',
+    ratePerSession: 30,
+    active: true,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    ...extra,
+  });
 
   it.each(resources)('%s starts empty', async (resource) => {
-    const res = await fetch(`${baseUrl}/api/${resource}`, { headers: authHeaders() });
+    const res = await api(resource);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
   });
 
-  it.each(resources)('%s rejects a non-array body', async (resource) => {
-    const res = await fetch(`${baseUrl}/api/${resource}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ not: 'an array' }),
-    });
-    expect(res.status).toBe(400);
+  it('saves one record at a time, returning its version, and lists it with _version', async () => {
+    const res = await put('students', 'stu_a', student('stu_a'), null);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, version: 1 });
+    expect(await list('students')).toEqual([{ ...student('stu_a'), _version: 1 }]);
+
+    const update = await put('students', 'stu_a', student('stu_a', { name: 'Ava' }), 1);
+    expect(await update.json()).toEqual({ ok: true, version: 2 });
   });
 
-  it.each(resources)('%s rejects unparseable JSON', async (resource) => {
-    const res = await fetch(`${baseUrl}/api/${resource}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: '{not valid json',
-    });
-    expect(res.status).toBe(400);
+  it('answers 409 with the newer copy when a save is based on an old version -- nothing overwritten', async () => {
+    await put('students', 'stu_b', student('stu_b'), null);
+    await put('students', 'stu_b', student('stu_b', { name: 'From phone' }), 1);
+
+    const stale = await put('students', 'stu_b', student('stu_b', { name: 'From laptop' }), 1);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ ok: false, conflict: true, version: 2, current: { name: 'From phone' } });
+    expect((await list('students')).find((s) => s.id === 'stu_b').name).toBe('From phone');
   });
 
-  it.each(resources)('%s round-trips a saved array', async (resource) => {
-    const payload = [{ id: `${resource}_1`, marker: resource }];
-    const post = await fetch(`${baseUrl}/api/${resource}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(payload),
-    });
-    expect(post.status).toBe(200);
-    expect(await post.json()).toEqual({ ok: true });
-
-    const get = await fetch(`${baseUrl}/api/${resource}`, { headers: authHeaders() });
-    expect(await get.json()).toEqual(payload);
+  it('deletes with the same version check', async () => {
+    await put('students', 'stu_del', student('stu_del'), null);
+    expect((await del('students', 'stu_del', 99)).status).toBe(409);
+    expect((await del('students', 'stu_del', 1)).status).toBe(200);
+    expect((await list('students')).some((s) => s.id === 'stu_del')).toBe(false);
   });
 
-  it('a write to one resource never affects the others', async () => {
-    const before = {};
-    for (const r of resources) {
-      before[r] = await (await fetch(`${baseUrl}/api/${r}`, { headers: authHeaders() })).json();
+  it('handles ids with characters like ":" (session ids contain times)', async () => {
+    await put('classes', 'grp_1', {
+      id: 'grp_1', name: 'Tue', type: 'one-on-one', studentIds: ['stu_a'],
+      schedule: [{ dayOfWeek: 2, startTime: '16:00', durationMinutes: 60 }], active: true, createdAt: '2026-09-01',
+    }, null);
+    const id = 'grp_1_2026-09-08_16:00';
+    const res = await put('sessions', id, {
+      id, date: '2026-09-08', startTime: '16:00', durationMinutes: 60, groupId: 'grp_1', isMakeup: false,
+      studentIds: ['stu_a'], attendance: { stu_a: 'present' }, createdAt: '2026-09-08',
+    }, null);
+    expect(res.status).toBe(200);
+    expect((await list('sessions')).map((s) => s.id)).toContain(id);
+  });
+
+  it('rejects malformed records, broken links, bad JSON, and a mismatched id with 400', async () => {
+    expect((await put('students', 'x', { id: 'x' }, null)).status).toBe(400);
+    expect((await put('payments', 'p', {
+      id: 'p', studentId: 'no-such-student', month: '2026-09', amountDue: 1, amountPaid: 0, status: 'unpaid', createdAt: 'x',
+    }, null)).status).toBe(400);
+    expect((await api('students/x', { method: 'PUT', body: '{not json' })).status).toBe(400);
+    expect((await put('students', 'y', student('z'), null)).status).toBe(400);
+  });
+
+  it('refuses the old "replace the whole list" saves (410), so an out-of-date app can never overwrite anything', async () => {
+    const before = await list('students');
+    for (const legacy of ['students', 'classes', 'attendance', 'makeup', 'payments']) {
+      const res = await api(legacy, { method: 'POST', body: JSON.stringify([]) });
+      expect(res.status).toBe(410);
+      expect((await res.json()).error).toMatch(/reload/i);
     }
-
-    await fetch(`${baseUrl}/api/students`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify([{ id: 'stu_isolation_check' }]),
-    });
-
-    for (const r of resources.filter((r) => r !== 'students')) {
-      const now = await (await fetch(`${baseUrl}/api/${r}`, { headers: authHeaders() })).json();
-      expect(now).toEqual(before[r]);
-    }
+    expect(await list('students')).toEqual(before);
   });
 
-  it('rejects methods other than GET/POST', async () => {
-    const res = await fetch(`${baseUrl}/api/students`, { method: 'DELETE', headers: authHeaders() });
-    expect(res.status).toBe(405);
+  it('still answers old attendance/makeup reads, from sessions', async () => {
+    const attendance = await list('attendance');
+    expect(attendance.every((s) => s.isMakeup === false)).toBe(true);
+    expect(attendance.length).toBeGreaterThan(0);
+    expect(await list('makeup')).toEqual([]);
   });
 
-  it('404s an unknown resource name', async () => {
+  it('rejects other methods', async () => {
+    expect((await api('students', { method: 'DELETE' })).status).toBe(405);
+    expect((await api('students/stu_a', { method: 'POST', body: '{}' })).status).toBe(405);
+  });
+
+  it('does not treat an unknown resource as a data route', async () => {
     // Falls through to the SPA-fallback static file logic, which for an
-    // authorized request serves index.html (200), not a 404 -- confirms
-    // /api/not-a-real-resource isn't accidentally treated as a data route.
+    // authorized request serves index.html (200).
     const res = await fetch(`${baseUrl}/api/not-a-real-resource`, { headers: authHeaders() });
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain('<html');
-  });
-});
-
-describe('automatic backups', () => {
-  // Backups are now whole-database snapshots (one flat tutoring-<stamp>.db
-  // file per backup, see server/db/sqlite-store.js), not a per-resource
-  // JSON directory -- read one back with node:sqlite the same way the
-  // store itself would.
-  function readSnapshotResource(dbPath, resource) {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(dbPath, { readOnly: true });
-    try {
-      const rows = db.prepare('SELECT data FROM records WHERE resource = ? ORDER BY seq ASC').all(resource);
-      return rows.map((row) => JSON.parse(row.data));
-    } finally {
-      db.close();
-    }
-  }
-
-  it('does not back up on the very first write (nothing existed yet)', async () => {
-    const backupsDir = path.join(dataDir, 'backups');
-    const before = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
-
-    await fetch(`${baseUrl}/api/makeup`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify([]),
-    });
-    // makeup may already have been written by an earlier test in this
-    // file; this test only asserts backups never shrink or error, since
-    // exact counts depend on test execution order.
-    const after = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
-    expect(after).toBeGreaterThanOrEqual(before);
+    expect(await res.text()).toContain('<html');
   });
 
-  it('snapshots the previous content before a second write', async () => {
-    const resource = 'payments';
-    const first = [{ id: 'pay_1', note: 'first' }];
-    const second = [{ id: 'pay_1', note: 'second' }];
+  describe('automatic backups', () => {
+    it('snapshots the database before a save, capturing the previous content', async () => {
+      const backupsDir = path.join(dataDir, 'backups');
+      const before = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
+      await put('students', 'stu_snap', student('stu_snap', { name: 'first' }), null);
+      await put('students', 'stu_snap', student('stu_snap', { name: 'second' }), 1);
 
-    await fetch(`${baseUrl}/api/${resource}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(first),
+      const snapshots = fs.readdirSync(backupsDir).sort();
+      expect(snapshots.length).toBeGreaterThan(before);
+
+      const { DatabaseSync } = require('node:sqlite');
+      const snap = new DatabaseSync(path.join(backupsDir, snapshots.at(-1)), { readOnly: true });
+      expect(snap.prepare("SELECT name FROM students WHERE id = 'stu_snap'").get().name).toBe('first');
+      snap.close();
     });
-    const backupsDir = path.join(dataDir, 'backups');
-    const before = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
-
-    await fetch(`${baseUrl}/api/${resource}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(second),
-    });
-
-    const snapshots = fs.readdirSync(backupsDir);
-    expect(snapshots.length).toBeGreaterThan(before);
-
-    const newestSnapshot = snapshots.sort().at(-1);
-    const snapshotContent = readSnapshotResource(path.join(backupsDir, newestSnapshot), resource);
-    expect(snapshotContent).toEqual(first);
-
-    const current = await (await fetch(`${baseUrl}/api/${resource}`, { headers: authHeaders() })).json();
-    expect(current).toEqual(second);
   });
 });
 

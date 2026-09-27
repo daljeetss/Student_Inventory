@@ -6,39 +6,50 @@ import { groupStudentsBySchedule } from '@/data/schedule-grouping';
 import { AppDataProvider, useAppData } from '@/data/store';
 
 // In-memory stand-in for src/data/storage.ts, keyed the same way the real
-// module is (one entry per resource: students/classes/attendance/makeup/
-// payments). This lets every test start from a clean, known state without
-// touching the filesystem, the network, or -- critically -- anything under
+// module is (one list per resource: students/classes/sessions/payments).
+// This lets every test start from a clean, known state without touching
+// the filesystem, the network, or -- critically -- anything under
 // production/ (see DESIGN.md: production/ is never to be used for tests).
-// setItem resolves `true` (a successful shared save) by default, matching
-// the real module's contract -- __failNextSetItem lets one test simulate a
-// real server write failure without every other test having to know or
-// care about that return value.
+// saveChanges resolves 'saved' by default, matching the real module's
+// contract; __failNextSave / __conflictNextSave let one test simulate a
+// server write failure or another device's conflicting save.
 jest.mock('@/data/storage', () => {
-  let store: Record<string, string> = {};
-  let failNext = false;
+  let server: Record<string, unknown[]> = {};
+  let nextOutcome: 'failed' | 'conflict' | null = null;
   return {
-    getItem: jest.fn(async (key: string) => store[key] ?? null),
-    setItem: jest.fn(async (key: string, value: string) => {
-      store[key] = value;
-      if (failNext) {
-        failNext = false;
-        return false;
+    loadResource: jest.fn(async (resource: string) => server[resource] ?? []),
+    reloadResource: jest.fn(async (resource: string) => server[resource] ?? []),
+    saveChanges: jest.fn(async (resource: string, _prev: unknown[], next: unknown[]) => {
+      if (nextOutcome) {
+        const outcome = nextOutcome;
+        nextOutcome = null;
+        return outcome;
       }
-      return true;
+      server[resource] = next;
+      return 'saved';
     }),
     __reset: () => {
-      store = {};
-      failNext = false;
+      server = {};
+      nextOutcome = null;
     },
-    __failNextSetItem: () => {
-      failNext = true;
+    __failNextSave: () => {
+      nextOutcome = 'failed';
+    },
+    /** The next save is refused because "another device" already saved
+     * `serverCopy` for that resource -- which is what a reload returns. */
+    __conflictNextSave: (resource: string, serverCopy: unknown[]) => {
+      nextOutcome = 'conflict';
+      server[resource] = serverCopy;
     },
   };
 });
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const mockStorage: { __reset: () => void; __failNextSetItem: () => void } = require('@/data/storage');
+const mockStorage: {
+  __reset: () => void;
+  __failNextSave: () => void;
+  __conflictNextSave: (resource: string, serverCopy: unknown[]) => void;
+} = require('@/data/storage');
 
 beforeEach(() => {
   mockStorage.__reset();
@@ -84,7 +95,7 @@ describe('AppDataProvider / useAppData', () => {
     });
     expect(alertSpy).not.toHaveBeenCalled();
 
-    mockStorage.__failNextSetItem();
+    mockStorage.__failNextSave();
     await act(async () => {
       result.current.addStudent({
         name: 'Ben',
@@ -100,6 +111,40 @@ describe('AppDataProvider / useAppData', () => {
     // The UI still updates optimistically either way -- the point is to
     // surface the failure, not to lose the local edit too.
     expect(result.current.data.students.map((s) => s.name)).toEqual(['Ava', 'Ben']);
+
+    alertSpy.mockRestore();
+  });
+
+  // Two devices editing the same record: the server refuses the stale
+  // save (nothing overwritten), and this device must say so and switch to
+  // the other device's newer copy rather than keep showing its own.
+  it('on a conflicting save, alerts and reloads the other device\'s newer copy', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { result } = await setup();
+
+    let ava: { id: string } | undefined;
+    await act(async () => {
+      ava = result.current.addStudent({
+        name: 'Ava',
+        grade: '3',
+        parentName: 'Priya',
+        parentPhone: '15551234567',
+        ratePerSession: 40,
+        active: true,
+      });
+    });
+
+    // Meanwhile another device changed Ava's rate to 50 and saved first.
+    const otherDevicesCopy = [{ ...result.current.data.students[0], ratePerSession: 50 }];
+    mockStorage.__conflictNextSave('students', otherDevicesCopy);
+
+    await act(async () => {
+      result.current.updateStudent(ava!.id, { ratePerSession: 45 });
+    });
+
+    await waitFor(() => expect(result.current.data.students[0].ratePerSession).toBe(50));
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toMatch(/another device/i);
 
     alertSpy.mockRestore();
   });

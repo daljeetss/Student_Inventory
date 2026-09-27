@@ -23,7 +23,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 
-const { openStore } = require('./db/store');
+const { openStore, ValidationError, RESOURCES } = require('./db/store');
 
 const ROOT = path.join(__dirname, '..');
 const DIST_DIR = path.join(ROOT, 'dist');
@@ -38,12 +38,17 @@ const PRODUCTION_DIR = process.env.TUTORING_DATA_DIR
   ? path.resolve(process.env.TUTORING_DATA_DIR)
   : path.join(ROOT, 'production');
 
-// Related to each other by the id fields already in the data model
-// (Student.id, ClassGroup.studentIds, SessionRecord.groupId/studentIds, the
-// makeup records' makeupForRecordId, Payment.studentId) -- never one big
-// blob, so a bad write to one can't take the others with it.
-const RESOURCES = ['students', 'classes', 'attendance', 'makeup', 'payments'];
+// /api/<resource> lists a whole resource; /api/<resource>/<id> saves or
+// deletes ONE record (see server/db/store.js for the version check that
+// stops two devices overwriting each other).
 const RESOURCE_PATTERN = new RegExp(`^/api/(${RESOURCES.join('|')})$`);
+const RECORD_PATTERN = new RegExp(`^/api/(${RESOURCES.join('|')})/([^/]+)$`);
+// Names/behavior from before per-record saves. A still-open copy of the
+// old app (loaded before an update) may keep calling these: reads still
+// work, but its "replace the whole list" saves are refused (410) -- that
+// kind of save is exactly what could overwrite another device's changes.
+const LEGACY_RESOURCE_PATTERN = /^\/api\/(students|classes|attendance|makeup|payments)$/;
+const OUT_OF_DATE_MESSAGE = 'This copy of the app is out of date. Reload the page to get the latest version.';
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // one resource file's worth; generous but not unbounded
 const PORT = Number(process.env.PORT) || 8899;
@@ -229,26 +234,43 @@ function main() {
 
     // The app's data, stored on this computer (in production/tutoring.db)
     // instead of in each device's browser storage -- every device using
-    // this server sees the same data. serve.js only ever calls the store's
-    // getResource/setResource -- see server/db/store.js for why.
+    // this server sees the same data. serve.js only ever talks to the
+    // store's contract -- see server/db/store.js for why.
+    const json = (code, obj) => send(res, code, JSON.stringify(obj), 'application/json', { 'Cache-Control': 'no-store' });
+
+    const recordMatch = pathname.match(RECORD_PATTERN);
+    if (recordMatch) {
+      const [, resource, id] = recordMatch;
+      if (req.method !== 'PUT' && req.method !== 'DELETE') return json(405, { ok: false, error: 'Method not allowed' });
+      try {
+        const raw = await readRequestBody(req);
+        const body = raw ? JSON.parse(raw) : {};
+        const baseVersion = body.baseVersion ?? null;
+        const result =
+          req.method === 'PUT'
+            ? await store.putRecord(resource, id, body.record, baseVersion)
+            : await store.deleteRecord(resource, id, baseVersion);
+        return json(result.ok ? 200 : 409, result);
+      } catch (err) {
+        const clientError = err instanceof ValidationError || err instanceof SyntaxError;
+        return json(clientError ? 400 : 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
     const resourceMatch = pathname.match(RESOURCE_PATTERN);
-    if (resourceMatch) {
-      const resource = resourceMatch[1];
-      if (req.method === 'GET') {
-        return send(res, 200, JSON.stringify(store.getResource(resource)), 'application/json', { 'Cache-Control': 'no-store' });
+    if (resourceMatch && req.method === 'GET') {
+      return json(200, store.getResource(resourceMatch[1]));
+    }
+
+    const legacyMatch = pathname.match(LEGACY_RESOURCE_PATTERN);
+    if (legacyMatch || resourceMatch) {
+      const legacy = legacyMatch ? legacyMatch[1] : resourceMatch[1];
+      if (req.method === 'GET' && (legacy === 'attendance' || legacy === 'makeup')) {
+        const wantMakeup = legacy === 'makeup';
+        return json(200, store.getResource('sessions').filter((s) => s.isMakeup === wantMakeup));
       }
-      if (req.method === 'POST') {
-        try {
-          const body = await readRequestBody(req);
-          const parsed = JSON.parse(body); // validate before persisting -- never save unparseable data
-          if (!Array.isArray(parsed)) throw new Error(`Expected a JSON array for ${resource}`);
-          await store.setResource(resource, parsed);
-          return send(res, 200, JSON.stringify({ ok: true }), 'application/json', { 'Cache-Control': 'no-store' });
-        } catch (err) {
-          return send(res, 400, JSON.stringify({ ok: false, error: String(err.message || err) }), 'application/json');
-        }
-      }
-      return send(res, 405, JSON.stringify({ ok: false, error: 'Method not allowed' }), 'application/json');
+      if (req.method === 'POST') return json(410, { ok: false, error: OUT_OF_DATE_MESSAGE });
+      return json(405, { ok: false, error: 'Method not allowed' });
     }
 
     const suppliedToken = url.searchParams.get('token');
@@ -292,6 +314,10 @@ function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // Closing the terminal window sends SIGHUP, not SIGINT -- without this,
+  // the database was never closed cleanly, so recent saves sat only in
+  // tutoring.db-wal instead of being folded into tutoring.db itself.
+  process.on('SIGHUP', shutdown);
 }
 
 main();

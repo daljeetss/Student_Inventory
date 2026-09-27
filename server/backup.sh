@@ -39,12 +39,22 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 TMP_TAR="$(mktemp -t tutoring-backup).tar.gz"
 OUTPUT_FILE="$OUTPUT_DIR/tutoring-backup-$STAMP.tar.gz.enc"
 
-cleanup() { rm -f "$TMP_TAR"; }
+STAGE="$(mktemp -d -t tutoring-backup-stage)"
+
+cleanup() { rm -f "$TMP_TAR"; rm -rf "$STAGE"; }
 trap cleanup EXIT
 
 # Only the current, real data -- not the on-disk backups/ history (that's a
-# separate, same-machine safety net; this is the off-machine one).
-tar -czf "$TMP_TAR" -C "$APP_DIR" --exclude 'production/backups' production
+# separate, same-machine safety net; this is the off-machine one). The
+# database itself goes in as a proper SQLite snapshot rather than a raw
+# copy of tutoring.db + tutoring.db-wal, so it's consistent even if the
+# server is running and saving right now.
+mkdir -p "$STAGE/production"
+find "$PRODUCTION_DIR" -maxdepth 1 -type f ! -name 'tutoring.db*' -exec cp -p {} "$STAGE/production/" \;
+if [ -f "$PRODUCTION_DIR/tutoring.db" ]; then
+  node "$SCRIPT_DIR/db/snapshot.js" "$PRODUCTION_DIR/tutoring.db" "$STAGE/production/tutoring.db"
+fi
+tar -czf "$TMP_TAR" -C "$STAGE" production
 
 echo "Encrypting backup -- enter a passphrase (you'll type it twice)."
 echo "Write this passphrase down somewhere safe and separate from the backup file. Without it, the backup can never be restored."

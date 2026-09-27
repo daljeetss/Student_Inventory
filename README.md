@@ -140,11 +140,23 @@ while using the app.
   survives restarting the server: the database isn't touched by
   starting/stopping the Node process. `production/` is automatically
   backed up before every single save (into `production/backups/`) and is
-  never to be used for testing. If you're upgrading from an older version
-  of this app that used separate `students.json`/`classes.json`/etc. files,
-  nothing to do — the next `npm run serve` imports them into
-  `tutoring.db` automatically, once, and leaves the originals in place
-  untouched.
+  never to be used for testing. Saves go one record at a time, and **two
+  devices can't overwrite each other**: if your wife's phone and your
+  laptop both change the same student/class/attendance, whichever saves
+  second is told "Changed on another device" and shown the newer version
+  instead of silently replacing it.
+
+  **Upgrading from an older version is automatic.** The first `npm run
+  serve` after updating converts the database to its new layout, once,
+  saving a copy of the old one first (`production/backups/pre-migration-*.db`,
+  never deleted) and checking every record came across identical — if
+  anything doesn't match, the server refuses to start and changes nothing.
+  The terminal prints how many records were moved. Reload the app on any
+  phone that still had it open. (Much older versions that used separate
+  `students.json`/`classes.json`/etc. files are imported the same way.)
+  `tutoring.db` and `tutoring.db-wal` always belong together — never copy
+  or delete one without the other; stop the server with Ctrl+C (or just
+  close the terminal) and it tidies the two into one.
 - Via Expo Go or `npm run web` (dev mode) — there's no server-side API in
   that mode, so it falls back to on-device storage (AsyncStorage on phones,
   localStorage on web), separate per device. This only matters for active
@@ -212,6 +224,29 @@ folder, after safety-copying it first):
 npm run restore -- ~/Documents/TutoringTrackerBackups/tutoring-backup-<timestamp>.tar.gz.enc
 ```
 
+## Looking at your data directly (SQL)
+
+```
+npm run db
+```
+
+This copies the current database to a temporary file (safely, even while
+the server is running) and opens it in `sqlite3`, the SQLite command line
+built into macOS. Because it's a copy, nothing you type can change your
+real data. Type `.tables` to list tables, `.schema students` to see a
+table's columns, and `.quit` to exit. Or run one query without the prompt:
+
+```
+npm run db -- "SELECT name, grade, rate_per_session FROM students ORDER BY name;"
+```
+
+The tables are `students`, `classes`, `class_students` (who's in each
+class), `class_slots` (weekly times), `sessions` (attendance + makeups),
+`session_students` (who was in a session and whether present/absent), and
+`payments` — see [DESIGN.md](./DESIGN.md#data-storage-sqlite-behind-a-decoupled-module).
+Never edit `production/tutoring.db` directly: changes have to go through
+the app so versions and backups stay correct.
+
 ## Running the tests
 
 ```
@@ -243,8 +278,8 @@ src/
   data/           the data model, storage, and business logic
     types.ts      Student / ClassGroup / SessionRecord / Payment shapes
     store.tsx     React context: all reads/writes go through useAppData()
-    storage.ts    talks to the server's /api/<resource> endpoints when
-                  available, else falls back to on-device storage
+    storage.ts    saves only changed records to the server (with
+                  version checks), else falls back to on-device storage
     whatsapp.ts   builds the due-amount/reminder messages + wa.me links
     date.ts       date/time formatting helpers
     __tests__/    unit tests for the above (npm test)
@@ -257,7 +292,9 @@ server/           the "npm run serve" home-screen-app server (see DESIGN.md)
   serve.js        static file server + token auth + /api/<resource>
   db/             the data store, decoupled from serve.js (see DESIGN.md)
     store.js        the interface serve.js actually calls
-    sqlite-store.js  the SQLite implementation (+ legacy JSON migration)
+    sqlite-store.js  the SQLite tables, per-record saves + version checks,
+                     and the automatic, self-verifying upgrade
+    snapshot.js      consistent copy of the database, used by backup.sh
     __tests__/       unit tests for the store, no HTTP involved
   backup.sh       npm run backup -- encrypted off-machine backup
   restore.sh      npm run restore -- reverses a backup.sh backup
@@ -268,8 +305,9 @@ server/           the "npm run serve" home-screen-app server (see DESIGN.md)
   access-token.txt   generated at runtime, not committed
 
 production/       ALL real data lives here -- never touch for testing.
-  tutoring.db     SQLite database -- students, classes, attendance,
-                  makeup, payments all live here now (see DESIGN.md)
+  tutoring.db     SQLite database -- students, classes, sessions,
+                  payments tables (see DESIGN.md); tutoring.db-wal
+                  holds its most recent saves -- keep the two together
   backups/        automatic snapshot of the database before every save
 ```
 

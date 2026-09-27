@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 
 import { monthKeysInRange, toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
-import { getItem, setItem } from '@/data/storage';
+import { loadResource, reloadResource, ResourceName, saveChanges, SaveOutcome } from '@/data/storage';
 import {
   AppData,
   AttendanceStatus,
@@ -130,18 +130,13 @@ export interface RangeBillingRow {
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
-/** Parses a resource's stored JSON, tolerating a missing/corrupt value by
- * falling back to an empty list for just that one resource -- a problem
- * with one file should never take the others down with it. */
-function parseResourceArray<T>(raw: string | null): T[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
+// Which storage resource backs each part of AppData.
+const RESOURCE_FOR: Record<keyof AppData, ResourceName> = {
+  students: 'students',
+  groups: 'classes',
+  sessions: 'sessions',
+  payments: 'payments',
+};
 
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(emptyAppData);
@@ -164,82 +159,73 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     (async () => {
-      // Five independent resources -- see server/serve.js and DESIGN.md.
-      // "sessions" in memory is attendance + makeup combined (convenient
-      // for the calendar/billing logic below); persisting splits them
-      // back apart by `isMakeup`.
-      const [studentsRaw, classesRaw, attendanceRaw, makeupRaw, paymentsRaw] = await Promise.all([
-        getItem('students'),
-        getItem('classes'),
-        getItem('attendance'),
-        getItem('makeup'),
-        getItem('payments'),
+      // Four independent resources -- see server/db/ and DESIGN.md. A
+      // problem loading one never takes the others down with it (each
+      // falls back to an empty list on its own).
+      const [students, groups, sessions, payments] = await Promise.all([
+        loadResource<Student>('students'),
+        loadResource<ClassGroup>('classes'),
+        loadResource<SessionRecord>('sessions'),
+        loadResource<Payment>('payments'),
       ]);
-      const loaded: AppData = {
-        students: parseResourceArray<Student>(studentsRaw),
-        groups: parseResourceArray<ClassGroup>(classesRaw),
-        sessions: [...parseResourceArray<SessionRecord>(attendanceRaw), ...parseResourceArray<SessionRecord>(makeupRaw)],
-        payments: parseResourceArray<Payment>(paymentsRaw),
-      };
+      const loaded: AppData = { students, groups, sessions, payments };
       dataRef.current = loaded;
       setData(loaded);
       setLoading(false);
     })();
   }, []);
 
-  // The UI updates immediately either way (setData above is synchronous) --
-  // this only reports when a save genuinely didn't reach a server that's
-  // known to exist (see setItem's doc comment: it never fires for the
-  // expected "no server in dev mode" case). One shared place for this
-  // means every action that goes through persistStudents/Groups/Sessions/
-  // Payments gets this protection automatically, instead of each of the
-  // dozen or so call sites needing to check it themselves.
-  const reportIfNotShared = useCallback((ok: boolean) => {
-    if (ok) return;
+  // Resources currently being reloaded after a conflict -- so a burst of
+  // saves that all hit the same conflict only alerts/reloads once.
+  const reloading = useRef(new Set<keyof AppData>());
+
+  // One shared place every save's outcome is handled, so each of the
+  // dozen or so actions below gets this for free:
+  // - 'failed': the UI already shows the change (setData ran first), but
+  //   the shared server doesn't have it yet -- say so honestly. It's
+  //   re-sent automatically with the next save of the same kind of data.
+  // - 'conflict': another device changed the same record first. Nothing
+  //   was overwritten on either side; reload the latest from the server
+  //   and let the user redo their change on top of it.
+  const handleOutcome = useCallback((key: keyof AppData, outcome: SaveOutcome) => {
+    if (outcome === 'failed') {
+      alert(
+        'Not saved to the shared server',
+        "This change only saved on this device for now — other devices (and this one, if you restart) won't see it until the connection is back. Check your Wi-Fi/network and try again.",
+      );
+      return;
+    }
+    if (outcome !== 'conflict' || reloading.current.has(key)) return;
+    reloading.current.add(key);
     alert(
-      'Not saved to the shared server',
-      "This change only saved on this device for now — other devices (and this one, if you restart) won't see it until the connection is back. Check your Wi-Fi/network and try again.",
+      'Changed on another device',
+      "Someone saved a newer version of this from another device, so your last change here wasn't applied — nothing was overwritten. The latest version has been loaded; please check it and redo your change if it's still needed.",
     );
+    reloadResource(RESOURCE_FOR[key]).then((fresh) => {
+      reloading.current.delete(key);
+      dataRef.current = { ...dataRef.current, [key]: fresh };
+      setData(dataRef.current);
+    });
   }, []);
 
-  const persistStudents = useCallback(
-    (students: Student[]) => {
-      dataRef.current = { ...dataRef.current, students };
+  // Updates the screen immediately (dataRef + setData, synchronously),
+  // then saves just the records that changed -- see storage.ts.
+  const persist = useCallback(
+    <K extends keyof AppData>(key: K, next: AppData[K]) => {
+      const prev = dataRef.current[key];
+      dataRef.current = { ...dataRef.current, [key]: next };
       setData(dataRef.current);
-      setItem('students', JSON.stringify(students)).then(reportIfNotShared);
+      saveChanges(RESOURCE_FOR[key], prev as { id: string }[], next as { id: string }[]).then((outcome) =>
+        handleOutcome(key, outcome),
+      );
     },
-    [reportIfNotShared],
+    [handleOutcome],
   );
 
-  const persistGroups = useCallback(
-    (groups: ClassGroup[]) => {
-      dataRef.current = { ...dataRef.current, groups };
-      setData(dataRef.current);
-      setItem('classes', JSON.stringify(groups)).then(reportIfNotShared);
-    },
-    [reportIfNotShared],
-  );
-
-  const persistSessions = useCallback(
-    (sessions: SessionRecord[]) => {
-      dataRef.current = { ...dataRef.current, sessions };
-      setData(dataRef.current);
-      Promise.all([
-        setItem('attendance', JSON.stringify(sessions.filter((s) => !s.isMakeup))),
-        setItem('makeup', JSON.stringify(sessions.filter((s) => s.isMakeup))),
-      ]).then(([attendanceOk, makeupOk]) => reportIfNotShared(attendanceOk && makeupOk));
-    },
-    [reportIfNotShared],
-  );
-
-  const persistPayments = useCallback(
-    (payments: Payment[]) => {
-      dataRef.current = { ...dataRef.current, payments };
-      setData(dataRef.current);
-      setItem('payments', JSON.stringify(payments)).then(reportIfNotShared);
-    },
-    [reportIfNotShared],
-  );
+  const persistStudents = useCallback((students: Student[]) => persist('students', students), [persist]);
+  const persistGroups = useCallback((groups: ClassGroup[]) => persist('groups', groups), [persist]);
+  const persistSessions = useCallback((sessions: SessionRecord[]) => persist('sessions', sessions), [persist]);
+  const persistPayments = useCallback((payments: Payment[]) => persist('payments', payments), [persist]);
 
   const addStudent = useCallback<AppDataContextValue['addStudent']>(
     (input) => {

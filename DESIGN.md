@@ -19,7 +19,7 @@ flowchart LR
     subgraph Mac["Your Mac — npm run serve"]
         S["server/serve.js<br/>(token auth + static files + /api/&lt;resource&gt;)"]
         ST["server/db/store.js<br/>(storage interface)"]
-        D[("production/tutoring.db<br/>(SQLite — students, classes,<br/>attendance, makeup, payments)")]
+        D[("production/tutoring.db<br/>(SQLite — students, classes,<br/>sessions, payments tables)")]
         W["dist/<br/>(built web app)"]
     end
 
@@ -27,7 +27,7 @@ flowchart LR
     B -- Wi-Fi --> S
     C -- localhost --> S
     S -- serves --> W
-    S -->|getResource/setResource| ST
+    S -->|getResource / putRecord / deleteRecord| ST
     ST <--> D
 ```
 
@@ -39,12 +39,12 @@ your phone, and the Mac's browser, as long as they're all on the same
 Wi-Fi and the server's running.
 
 `serve.js` never talks to SQLite directly — it only ever calls
-`store.js`'s `getResource`/`setResource`, which is implemented today by
-`server/db/sqlite-store.js`. That one extra layer is deliberate: it's a
-decoupled module boundary, so a future storage backend (e.g. a cloud-hosted
-database, for reachability beyond the home Wi-Fi — see README's "Beyond
-the home Wi-Fi") is a new file behind the same three-method contract, not a
-rewrite of the HTTP/auth/static-file code in `serve.js`. See
+`store.js`'s `getResource`/`putRecord`/`deleteRecord`, which is
+implemented today by `server/db/sqlite-store.js`. That one extra layer is
+deliberate: it's a decoupled module boundary, so a future storage backend
+(e.g. a cloud-hosted database, for reachability beyond the home Wi-Fi —
+see README's "Beyond the home Wi-Fi") is a new file behind the same small
+contract, not a rewrite of the HTTP/auth/static-file code in `serve.js`. See
 [Data storage](#data-storage-sqlite-behind-a-decoupled-module) below for
 what's actually inside that module.
 
@@ -65,21 +65,23 @@ separate copy. That's fine for trying out a code change, but it's why
 day-to-day use should go through `npm run serve`, not dev mode — see
 [storage.ts's fallback logic](./src/data/storage.ts).
 
-**A save always updates the screen immediately** (`store.tsx`'s
-`persistStudents`/`Groups`/`Sessions`/`Payments` all call `setData(...)`
-synchronously, before the network call even starts) — but that's *local*
-state, not proof the save reached the shared server. `storage.ts`'s
-`setItem` returns whether it actually did, with one deliberate wrinkle: it
-tracks `serverConfirmedReachable` (has any `/api/<resource>` call
-succeeded yet this session?) so it can tell "there's no server at all"
-(dev mode — the expected, silent, correct fallback to local-only storage)
+**A save always updates the screen immediately** (`store.tsx`'s one
+`persist` helper, behind `persistStudents`/`Groups`/`Sessions`/`Payments`,
+calls `setData(...)` synchronously, before the network call even starts) —
+but that's *local* state, not proof the save reached the shared server.
+`storage.ts`'s `saveChanges` resolves with what actually happened —
+`'saved'`, `'local-only'`, `'failed'`, or `'conflict'` (see [Saving one
+record at a time](#saving-one-record-at-a-time-and-why-two-devices-cant-overwrite-each-other)).
+It tracks `serverConfirmedReachable` (has any `/api` call succeeded yet
+this session?) so it can tell "there's no server at all" (dev mode — the
+expected, silent, correct fallback to local-only storage, `'local-only'`)
 apart from "there IS a server and this particular write didn't reach it"
-(a real failure — the local update happened, but no other device will see
-it, and it won't survive this device forgetting it). Only the second case
-returns `false`. `store.tsx`'s `reportIfNotShared` is the one place all
-four `persist*` helpers route through it, so it alerts a plain, honest
-warning — every action that goes through any of them (there are about a
-dozen) gets this for free, rather than each needing its own check. This
+(`'failed'` — the local update happened, but no other device will see it
+yet; it's re-sent automatically with the next save of that resource).
+`store.tsx`'s `handleOutcome` is the one place every save's outcome is
+handled, so it alerts a plain, honest warning — every action that goes
+through `persist` (there are about a dozen) gets this for free, rather
+than each needing its own check. This
 exists for the same reason as the Save Attendance button showing
 "✓ Saved"/disabled instead of always looking the same regardless of
 whether anything actually saved (see Testing, below, for the regression
@@ -99,7 +101,8 @@ did nothing at all — the underlying save was working the whole time, only
 the confirmation was invisible. `alert(title, message?)` is a drop-in
 replacement: real `Alert.alert` on native (Expo Go), `window.alert` on web
 (every browser actually implements it). Fixed everywhere at once rather
-than per screen, including the `reportIfNotShared` warning above, which
+than per screen, including the "not saved" warning above (now in
+`handleOutcome`), which
 had the exact same problem — a real save failure would have alerted
 nothing on web either. Where a screen's feedback doesn't *need* to depend
 on an alert firing at all — Classes' Save Changes/Mark Active/Mark
@@ -122,7 +125,7 @@ glance across a list of students/classes.
 **Two mutating actions in the same tick can't clobber each other**, via a
 `dataRef` (a plain `useRef`, not `data` the state variable) that every
 `persist*` helper updates *synchronously* the instant it runs, before
-`setItem`'s network call even starts. Every action that computes a "next
+`saveChanges`'s network call even starts. Every action that computes a "next
 array" (`addStudent`, `updateStudent`, `addGroup`, `updateGroup`,
 `saveAttendance`, `scheduleMakeup`, `rescheduleStudents`, and the payment
 functions via `resolvePayment`) reads from `dataRef.current`, never from
@@ -185,44 +188,87 @@ cache lifetimes only on the hashed, content-addressed JS/CSS bundle files
 ## Data storage: SQLite behind a decoupled module
 
 `server/db/store.js` is the *only* file `serve.js` imports for data access,
-and its whole surface is three functions: `getResource(resource)`,
-`setResource(resource, records)`, `close()`. Nothing above that line
+and its whole surface is four functions: `getResource(resource)`,
+`putRecord(resource, id, record, baseVersion)`,
+`deleteRecord(resource, id, baseVersion)`, `close()` (the resources are
+`students`, `classes`, `sessions`, `payments`). Nothing above that line
 (`serve.js`, and by extension everything in `src/`, which only ever talks
-to `serve.js`'s `/api/<resource>` HTTP layer) knows or cares that the data
-lives in SQLite — it's just "ask the store for an array, or hand it a new
-one." That's what makes the backend swappable later without touching HTTP,
-auth, or any screen: a different backend is a new file next to
-`sqlite-store.js` implementing the same three functions, with `store.js`'s
-one-line `openStore` pointed at it instead.
+to `serve.js`'s HTTP layer) knows or cares that the data lives in SQLite.
+That's what makes the backend swappable later without touching HTTP, auth,
+or any screen: a different backend is a new file next to `sqlite-store.js`
+implementing the same functions, with `store.js`'s one-line `openStore`
+pointed at it instead.
 
 The current implementation, `server/db/sqlite-store.js`, uses Node's
 built-in `node:sqlite` (no extra native dependency to install or compile)
-— one file, `production/tutoring.db`. Rather than a table per resource
-with fixed columns, there's a single `records` table (`resource`, `id`,
-`seq`, `data` as a JSON string): the API's contract has always been "the
-client owns the shape, the server just persists whatever JSON array it's
-given" (see `serve.test.js`'s round-trip tests, which POST arbitrary
-shapes), and a fixed-column schema would quietly break that. `seq`
-preserves save order, since array order is what the UI renders in and a
-SQL table has no order of its own.
+— one file, `production/tutoring.db`, with real tables:
 
-**Migrating from the old one-JSON-file-per-resource layout is automatic
-and one-time.** If `sqlite-store.js` opens a folder that has no
-`tutoring.db` yet but does have the old `students.json`/`classes.json`/etc.
-sitting in it, it imports them into the new database on that first open —
-`npm run serve` just picks up right where it left off, nothing to run by
-hand. The original `.json` files are never deleted or modified, only ever
-read once — an extra safety copy sits there afterward, doing no harm.
+| Table | Holds | Links |
+|---|---|---|
+| `students` | one row per `Student` | — |
+| `classes` | one row per `ClassGroup` | — |
+| `class_students` | a class's roster, in order | → classes, → students |
+| `class_slots` | a class's weekly times, in order | → classes |
+| `sessions` | one row per `SessionRecord` (attendance and makeups, by `is_makeup`) | → classes |
+| `session_students` | who a session involves: roster position and/or attendance mark | → sessions, → students |
+| `payments` | one row per `Payment` | → students |
 
-**Automatic backups moved into the store itself**, not `serve.js` — same
+Foreign keys are enforced, so the database itself refuses a class listing a
+student who doesn't exist, a payment for a nonexistent student, and so on
+(`makeup_for_record_id` is deliberately a plain column, not a foreign key —
+a makeup and the session it's for can be created in the same save, in
+either order). Every main table has a `version` (see below), a `seq`
+(keeps list order stable — new records go at the end, updates stay in
+place), and an `extra` JSON column: any field a record carries that isn't
+in [`src/data/types.ts`](./src/data/types.ts) yet goes there instead of
+being dropped, so adding a field to the app can never silently lose data
+just because this file wasn't updated too. (Weekly slots have no `extra`,
+so an unknown field inside one is refused outright rather than dropped.)
+The schema version is tracked with SQLite's own `PRAGMA user_version`.
+
+**Upgrading from the old layout is automatic, one-time, and
+self-verifying.** Before these real tables (schema v0), everything lived in
+one generic `records` table as JSON text, and every save replaced a
+resource's whole list — and before *that*, in `production/*.json` files.
+The first time `sqlite-store.js` opens an older database, `migrateToV1`:
+1. saves a whole-database copy to
+   `production/backups/pre-migration-v1-<timestamp>.db` — never pruned;
+2. inside one transaction, creates the new tables and copies every record
+   across (old `attendance` + `makeup` become `sessions`);
+3. reads **every** record back and compares it field-by-field (canonical
+   JSON, key order ignored) to the original — and if the counts differ,
+   any record doesn't come back identical, any record is malformed, or any
+   link is broken, rolls the whole transaction back and refuses to start
+   the server, with the database exactly as it was;
+4. only then marks the schema as v1 and folds the write-ahead log into the
+   main `.db` file.
+
+The old `records` table (and the even older `.json` files) are left in
+place, untouched. This was rehearsed on a copy of the real data before
+shipping: all 43 records (15 students, 7 classes, 19 attendance, 1
+makeup, 1 payment) came back identical, verified independently of the
+migration's own check, with zero broken links.
+
+**Closing the server cleanly matters.** SQLite (in WAL mode) keeps recent
+saves in `tutoring.db-wal` until they're folded into `tutoring.db`, so the
+two files must always travel together. `serve.js` closes the database on
+Ctrl+C, `kill`, *and* closing the terminal window (SIGHUP — before this was
+handled, weeks of saves were sitting only in the `-wal` file), and closing
+folds the log in. `npm run backup` doesn't copy these files raw either: it
+uses `server/db/snapshot.js` (SQLite's own online backup) to write one
+consistent, self-contained `tutoring.db` into the backup, safe even while
+the server is running and saving.
+
+**Automatic backups live in the store itself**, not `serve.js` — same
 reasoning as the rest of this module boundary: `serve.js` shouldn't need to
 know backups exist any more than it needs to know SQLite does. Every
-`setResource` call snapshots the whole `tutoring.db` file as it stood
-immediately before, via `node:sqlite`'s `backup()` (a safe, consistent
-hot-copy, even mid-write), into `production/backups/<timestamp>.db`
-(best-effort, never blocks the actual save; skipped on the very first
-write ever, since there's nothing yet to snapshot; the oldest beyond the
-most recent ~200 get pruned). This exists because real user data was lost
+`putRecord`/`deleteRecord` call snapshots the whole `tutoring.db` file as
+it stood immediately before, via `node:sqlite`'s `backup()` (a safe,
+consistent hot-copy, even mid-write), into
+`production/backups/<timestamp>.db` (best-effort, never blocks the actual
+save; skipped while there's nothing yet to snapshot; the oldest beyond the
+most recent ~200 get pruned, except pre-migration copies, which are kept
+forever). This exists because real user data was lost
 once — testing directly against the live data file, then deleting it
 during cleanup — and needed to be recovered from a browser's local
 storage. **`production/` is never to be used for testing, ever** — point
@@ -230,13 +276,66 @@ storage. **`production/` is never to be used for testing, ever** — point
 environment variable for anything experimental instead; every test in this
 repo does.
 
+### Saving one record at a time, and why two devices can't overwrite each other
+
+Before, every save sent a resource's *entire* list and the server replaced
+it wholesale. That meant two devices with the same screen open could
+silently wipe out each other's work: each saved its own copy of the whole
+list, and whichever saved last won. Now:
+
+- **The API is per-record.** `GET /api/<resource>` lists a resource (each
+  record carrying a `_version`); `PUT /api/<resource>/<id>` with
+  `{record, baseVersion}` saves one; `DELETE /api/<resource>/<id>` with
+  `{baseVersion}` removes one.
+- **Every row has a `version`,** starting at 1 and bumped on each save.
+  `baseVersion` is the version the device last saw (`null` = "I believe
+  this is new"). If it doesn't match what's stored — someone else saved,
+  created, or deleted that record in the meantime — the server writes
+  nothing and answers **409** with the newer copy. The check and the write
+  happen in one `BEGIN IMMEDIATE` transaction, so no other request can
+  slip in between.
+- **The app only sends what changed.** `store.tsx`'s screens still work
+  in whole lists — nothing above the storage layer had to change — and
+  `storage.ts`'s `saveChanges(resource, prev, next)` diffs the before and
+  after lists (`diffRecords`) and sends just the new/changed records as
+  PUTs and removed ones as DELETEs. Versions are tracked per record from
+  each load and each save response.
+- **All writes go through one queue, in order,** so a new class is never
+  saved before the new student it lists (that would fail the foreign-key
+  check), and back-to-back edits to the same record each use the version
+  the previous one returned.
+- **On a 409,** `storage.ts` stops sending anything else for that resource
+  (its queued edits were made against the out-of-date copy), and
+  `store.tsx` shows "Changed on another device — … nothing was
+  overwritten", then reloads that resource from the server (queued behind
+  the in-flight saves, so none of them run afterward with stale data). The
+  user redoes their change on top of the latest copy if it's still needed.
+- **On a network failure,** the failed records are remembered and re-sent
+  with the next save of that resource, so a blip doesn't quietly drop an
+  edit.
+- **An out-of-date copy of the app can't do damage either.** The old
+  "replace the whole list" `POST /api/<resource>` now answers **410**
+  ("reload the page"), and the old `attendance`/`makeup` names still
+  answer reads (from `sessions`), so a phone that still has the previous
+  version open can look but never overwrite.
+
+Native (Expo Go) and the no-server dev mode keep the whole list in local
+storage, exactly as before; a device that stored sessions as the old two
+lists (`attendance`, `makeup`) has them read back as one.
+
+Verified live: two Chrome tabs opened on the same student against a copy
+of the real data; one saved a change, then the other (still showing the
+old version) tried to change the same student. The server refused it
+(still showing only the first save), and the stale tab showed the
+"Changed on another device" message and reloaded the newer copy.
+
 ## Data model
 
-Logically, still the same five arrays as before — `getResource`/
-`setResource`'s `resource` argument is one of `students`, `classes`,
-`attendance`, `makeup`, `payments` — related to each other by id fields
-rather than by nesting. What changed is only *where* those arrays are
-persisted (`production/tutoring.db`, above), not their shape:
+Logically, still the same records as before — four resources, `students`,
+`classes`, `sessions` (attendance and makeups together), `payments` —
+related to each other by id fields. On the client they're still plain
+JSON shapes ([`src/data/types.ts`](./src/data/types.ts)); the server stores
+them in the tables above:
 
 ```mermaid
 erDiagram
@@ -552,25 +651,39 @@ projects, configured in `package.json`'s `"jest"` field:
   test that the not-yet-saved Payment id stays deterministic across
   repeated calls (see "why the Payment id is deterministic" above — this
   is the exact bug that test would have caught).
+  `src/data/__tests__/storage.test.ts` drives the real `storage.ts` against
+  a small in-memory fake of the server's PUT/DELETE contract: only changed
+  records are sent, versions are tracked across back-to-back saves, a
+  stale save is refused and later saves for that resource are held back
+  until a reload, a record another device deleted isn't re-created, a
+  failed save is re-sent with the next one, and the no-server dev-mode
+  fallback. `store.test.tsx` also covers the app's side of a conflict:
+  the alert, and switching to the other device's newer copy.
   `src/utils/__tests__/alert.test.ts` is a similarly direct regression test
   for the `Alert.alert`-is-a-no-op-on-web bug above — it mocks
   `Platform.OS = 'web'` and asserts `window.alert` actually gets called
   (and that the real `Alert.alert` doesn't, on web).
 - **`server`** (`server/**/__tests__/`, plain Node) — two layers:
   - `server/db/__tests__/sqlite-store.test.js` unit-tests the store module
-    directly (no HTTP): round-tripping, whole-array replace semantics,
-    cross-resource isolation, arbitrary/unknown-shaped records, the
-    automatic-backup-before-write behavior (including that it's skipped on
-    the very first write), and the legacy JSON migration (imports once,
-    never re-imports over real changes, tolerates a corrupt/empty legacy
-    file without failing to start).
+    directly (no HTTP): exact round-trips of every record type (including
+    optional fields, roster order, weekly slots, a student marked but no
+    longer on a session's roster, and unknown fields kept via `extra`),
+    version checks (stale saves/deletes refused, "create" of something that
+    exists refused, update of something deleted refused), the database
+    rejecting broken links and malformed records, per-save backups, and
+    the upgrade from the old `records` table: every record identical,
+    pre-migration copy saved, runs once only, and — the important part —
+    refuses and changes nothing on a broken link, a malformed record, or
+    anything it couldn't store exactly.
   - `server/__tests__/serve.test.js` spawns the real `server/serve.js` as a
     subprocess against a throwaway `TUTORING_DATA_DIR` and a random port,
     then drives it over real HTTP: token auth (header, query param,
-    cookie, wrong token), every `/api/<resource>` endpoint (empty-start,
-    shape validation, round-tripping, cross-resource isolation), the
-    same backup behavior as seen from the outside (an HTTP write), and the
-    cache-control headers on `index.html` vs. hashed assets vs. the API.
+    cookie, wrong token), the per-record API (PUT/DELETE, versions, 409 on
+    a stale save with nothing overwritten, 400 for malformed records /
+    broken links / bad JSON, ids containing `:`), the old whole-list POST
+    refused with 410, old `attendance`/`makeup` reads still answered, the
+    same backup behavior as seen from the outside, and the cache-control
+    headers on `index.html` vs. hashed assets vs. the API.
 
   Every test file that touches data uses `TUTORING_DATA_DIR` (or the
   mocked storage module, for the `app` project, or its own `mkdtemp`

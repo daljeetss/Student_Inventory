@@ -52,6 +52,7 @@
     "test:watch": "jest --watch",
     "backup": "bash server/backup.sh",
     "restore": "bash server/restore.sh",
+    "db": "node server/db/snapshot.js production/tutoring.db \"${TMPDIR:-/tmp}/tutoring-query.db\" && sqlite3 -header -column \"${TMPDIR:-/tmp}/tutoring-query.db\"",
     "gdrive-auth": "node server/gdrive-auth.js"
   },
   "jest": {
