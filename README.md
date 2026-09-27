@@ -312,3 +312,8 @@ production/       ALL real data lives here -- never touch for testing.
 ```
 
 See [DESIGN.md](./DESIGN.md) for how these pieces talk to each other.
+
+---
+
+Copyright © 2026 Marsar Solutions LLC. All rights reserved. See
+[LICENSE](./LICENSE) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

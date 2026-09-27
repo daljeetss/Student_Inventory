@@ -33,7 +33,7 @@ export default function StudentsScreen() {
   const { days, unscheduled, inactive } = groupStudentsBySchedule(data.students, data.groups);
 
   return (
-    <Screen>
+    <Screen copyright>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
         <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
           Students

@@ -42,7 +42,7 @@ export default function TodayScreen() {
   };
 
   return (
-    <Screen>
+    <Screen copyright>
       <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
         Schedule
       </ThemedText>

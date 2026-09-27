@@ -196,7 +196,7 @@ export default function BillingScreen() {
   };
 
   return (
-    <Screen>
+    <Screen copyright>
       <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
         Billing
       </ThemedText>

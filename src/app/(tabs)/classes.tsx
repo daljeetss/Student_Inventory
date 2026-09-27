@@ -57,7 +57,7 @@ export default function ClassesScreen() {
     item.studentIds.map((id) => data.students.find((s) => s.id === id)).filter((s): s is Student => !!s);
 
   return (
-    <Screen>
+    <Screen copyright>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
         <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
           Classes

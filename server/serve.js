@@ -53,6 +53,10 @@ const OUT_OF_DATE_MESSAGE = 'This copy of the app is out of date. Reload the pag
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // one resource file's worth; generous but not unbounded
 const PORT = Number(process.env.PORT) || 8899;
 
+// Same text as src/constants/brand.ts (this file can't import it) -- keep
+// the two in sync. See LICENSE.
+const COPYRIGHT_NOTICE = '© 2026 Marsar Solutions LLC. All rights reserved.';
+
 const APP_NAME = 'Tutoring Tracker';
 const SHORT_NAME = 'Tutoring';
 const THEME_COLOR = '#2E7D32';
@@ -153,6 +157,7 @@ code{background:#eee;padding:2px 6px;border-radius:4px}</style></head>
 <p>Use the full link printed in the terminal when the server started
 (it looks like <code>http://&lt;ip&gt;:${PORT}/?token=...</code>), or check
 <code>server/access-token.txt</code> for the token.</p>
+<p style="margin-top:40px;color:#888;font-size:12px">${COPYRIGHT_NOTICE}</p>
 </body></html>`;
 
 const MIME_TYPES = {

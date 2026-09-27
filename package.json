@@ -2,6 +2,8 @@
   "name": "app",
   "main": "expo-router/entry",
   "version": "1.0.0",
+  "author": "Marsar Solutions LLC",
+  "license": "UNLICENSED",
   "dependencies": {
     "@expo/ui": "~57.0.13",
     "@react-native-async-storage/async-storage": "2.2.0",
