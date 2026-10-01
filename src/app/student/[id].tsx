@@ -9,7 +9,7 @@ import { Card } from '@/components/ui/card';
 import { ChipSelect } from '@/components/ui/chip-select';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
-import { formatDateLabel, formatTime } from '@/data/date';
+import { formatDateLabel, formatMinutes, formatTime } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { Grade } from '@/data/types';
 import { alert } from '@/utils/alert';
@@ -70,7 +70,7 @@ export default function StudentDetailScreen() {
         <ChipSelect options={GRADE_OPTIONS} value={grade} onChange={setGrade} />
         <TextField label="Parent name" value={parentName} onChangeText={setParentName} />
         <TextField label="Parent WhatsApp phone" value={parentPhone} onChangeText={setParentPhone} keyboardType="phone-pad" />
-        <TextField label="Rate per session ($)" value={rate} onChangeText={setRate} keyboardType="decimal-pad" />
+        <TextField label="Rate per hour ($)" value={rate} onChangeText={setRate} keyboardType="decimal-pad" />
         <TextField label="Notes" value={notes} onChangeText={setNotes} multiline />
         <View style={{ flexDirection: 'row', gap: 10 }}>
           <View style={{ flex: 1 }}>
@@ -104,7 +104,7 @@ export default function StudentDetailScreen() {
 
       <Card>
         <ThemedText type="smallBold">Billing</ThemedText>
-        <ThemedText themeColor="textSecondary">${student.ratePerSession.toFixed(2)} / session</ThemedText>
+        <ThemedText themeColor="textSecondary">${student.ratePerSession.toFixed(2)} / hour</ThemedText>
       </Card>
 
       {student.notes && (
@@ -137,7 +137,8 @@ export default function StudentDetailScreen() {
         <Card key={s.id}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
             <ThemedText type="small">
-              {formatDateLabel(s.date)} · {formatTime(s.startTime)}
+              {formatDateLabel(s.date)} · {formatTime(s.startTime)} · {formatMinutes(s.durationMinutes)}
+              {s.extraMinutes?.[student.id] ? ` + ${formatMinutes(s.extraMinutes[student.id])} extra` : ''}
               {s.isMakeup ? ' (rescheduled)' : ''}
             </ThemedText>
             <Badge

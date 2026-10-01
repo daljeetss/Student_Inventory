@@ -8,7 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
-import { formatDateLabel, formatTime, fromDateKey } from '@/data/date';
+import { formatDateLabel, formatMinutes, formatTime, fromDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { AttendanceStatus, Student } from '@/data/types';
 import { alert } from '@/utils/alert';
@@ -25,6 +25,23 @@ function attendanceEqual(
   return keysA.every((k) => a[k] === b[k]);
 }
 
+const EXTRA_STEP_MINUTES = 30;
+const MAX_EXTRA_MINUTES = 240;
+
+/** Extra time that would actually be saved: only for students marked
+ * present, and only non-zero amounts (same rule as saveAttendance). */
+function effectiveExtra(
+  attendance: Record<string, AttendanceStatus | undefined>,
+  extra: Record<string, number>,
+): Record<string, number> {
+  return Object.fromEntries(Object.entries(extra).filter(([sid, m]) => attendance[sid] === 'present' && m > 0));
+}
+
+function extraEqual(a: Record<string, number>, b: Record<string, number>): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((k) => (a[k] ?? 0) === (b[k] ?? 0));
+}
+
 export default function SessionScreen() {
   const { id, date } = useLocalSearchParams<{ id: string; date: string }>();
   const router = useRouter();
@@ -34,11 +51,15 @@ export default function SessionScreen() {
   const occurrence = occurrences.find((o) => o.id === id);
 
   const [draft, setDraft] = useState<Record<string, AttendanceStatus | undefined>>({});
+  const [extraDraft, setExtraDraft] = useState<Record<string, number>>({});
   const [makeupFor, setMakeupFor] = useState<string | null>(null);
   const [reschedulingOpen, setReschedulingOpen] = useState(false);
 
   useEffect(() => {
-    if (occurrence) setDraft(occurrence.attendance);
+    if (occurrence) {
+      setDraft(occurrence.attendance);
+      setExtraDraft(occurrence.extraMinutes);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occurrence?.id]);
 
@@ -65,13 +86,20 @@ export default function SessionScreen() {
       return next;
     });
 
+  const changeExtra = (sid: string, delta: number) =>
+    setExtraDraft((d) => ({ ...d, [sid]: Math.min(MAX_EXTRA_MINUTES, Math.max(0, (d[sid] ?? 0) + delta)) }));
+
   // Reflects whether what's on screen matches what's actually persisted --
   // a fresh, never-saved occurrence always counts as "not saved yet" even
   // if nothing's marked, so this isn't just draft-vs-attendance equality.
-  const isSaved = occurrence.persisted && attendanceEqual(draft, occurrence.attendance);
+  // Extra time counts too, so changing it re-enables Save.
+  const isSaved =
+    occurrence.persisted &&
+    attendanceEqual(draft, occurrence.attendance) &&
+    extraEqual(effectiveExtra(draft, extraDraft), occurrence.extraMinutes);
 
   const save = () => {
-    saveAttendance(occurrence, draft as Record<string, AttendanceStatus>);
+    saveAttendance(occurrence, draft as Record<string, AttendanceStatus>, effectiveExtra(draft, extraDraft));
   };
 
   const confirmMakeup = (selection: MakeupSelection) => {
@@ -96,7 +124,8 @@ export default function SessionScreen() {
   return (
     <Screen>
       <ThemedText type="smallBold">
-        {occurrence.groupName} · {formatDateLabel(occurrence.date)} · {formatTime(occurrence.startTime)}
+        {occurrence.groupName} · {formatDateLabel(occurrence.date)} · {formatTime(occurrence.startTime)} ·{' '}
+        {formatMinutes(occurrence.durationMinutes)}
       </ThemedText>
 
       {!reschedulingOpen && occurrence.studentIds.length > 0 && (
@@ -133,6 +162,27 @@ export default function SessionScreen() {
               />
             </View>
           </View>
+          {draft[sid] === 'present' && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <ThemedText type="small" themeColor="textSecondary" style={{ flex: 1 }}>
+                {(extraDraft[sid] ?? 0) > 0
+                  ? `Extra time: ${formatMinutes(extraDraft[sid])} (total ${formatMinutes(occurrence.durationMinutes + extraDraft[sid])})`
+                  : 'Extra time: none'}
+              </ThemedText>
+              <Button
+                title="− 30 min"
+                variant="ghost"
+                disabled={(extraDraft[sid] ?? 0) <= 0}
+                onPress={() => changeExtra(sid, -EXTRA_STEP_MINUTES)}
+              />
+              <Button
+                title="+ 30 min"
+                variant="ghost"
+                disabled={(extraDraft[sid] ?? 0) >= MAX_EXTRA_MINUTES}
+                onPress={() => changeExtra(sid, EXTRA_STEP_MINUTES)}
+              />
+            </View>
+          )}
           {draft[sid] && <Button title="Clear" variant="ghost" onPress={() => clearStatus(sid)} />}
 
           {occurrence.persisted && occurrence.attendance[sid] === 'absent' && needsMakeup(occurrence.id, sid) && (

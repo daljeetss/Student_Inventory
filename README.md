@@ -72,7 +72,7 @@ while using the app.
 ## How it works
 
 - **Students** — add each student with their grade, parent's name/WhatsApp
-  number, and their per-session rate. The list is grouped by day and then
+  number, and their hourly rate. The list is grouped by day and then
   by which class meets that day (a class meeting twice a week shows up
   under both days, same roster), so it reads the way you actually think
   about your week, not an alphabetical list — with "No class scheduled
@@ -83,8 +83,10 @@ while using the app.
   (sorted by start time within each day), with "No weekly time set yet"
   and "Inactive" sections at the end. The **Today** tab automatically shows
   what's scheduled for any given day based on this.
-- **Today** — tap a class to mark each student present/absent, then **Save
-  Attendance**, which turns into a greyed-out **✓ Saved** once it's
+- **Today** — tap a class to mark each student present/absent. If someone
+  stayed longer than the class, tap **+ 30 min** under their name (as many
+  times as needed; **− 30 min** to undo) — that extra time is billed for
+  just that student. Then **Save Attendance**, which turns into a greyed-out **✓ Saved** once it's
   actually saved (and back to the normal button the moment you change
   something, so it's never ambiguous whether your latest change is saved).
   If a save can't reach the shared server at all (e.g. no Wi-Fi), you'll
@@ -115,8 +117,13 @@ while using the app.
   same button is on the **Classes** tab too, for reminding about a
   recurring class in general rather than one specific day.
 - **Billing** — defaults to the current month, moved one month at a time
-  with **← Prev**/**Next →**; it totals each student's attended sessions
-  (regular + makeup) × their rate. To bill several months together instead
+  with **← Prev**/**Next →**; it bills each student by **time**: the hours
+  they attended (regular + makeup sessions, each at its class length, plus
+  any extra time) × their hourly rate — so a 1.5-hour class bills 1.5 hours,
+  shown as e.g. "4 sessions · 4.5 hrs × $30.00/hr = $135.00". Changing a
+  class's length only affects sessions from then on; already-marked ones
+  keep the length they had. A month with nothing attended yet shows
+  **Nothing due**, not Paid. To bill several months together instead
   (e.g. someone hasn't paid in a while), tap **2 months**/**3**/**6**/**12**
   under "Combine months" — the totals, WhatsApp reminder, and payment
   actions below all combine across that many months ending at whichever

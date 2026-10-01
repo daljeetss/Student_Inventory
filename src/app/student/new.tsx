@@ -36,7 +36,7 @@ export default function NewStudentScreen() {
     if (!parentPhone.trim()) return alert('Phone required', "Enter the parent's WhatsApp phone number.");
     const parsedRate = Number(rate);
     if (!rate || Number.isNaN(parsedRate) || parsedRate <= 0) {
-      return alert('Rate required', 'Enter a valid per-session rate, e.g. 40.');
+      return alert('Rate required', 'Enter a valid hourly rate, e.g. 40.');
     }
 
     addStudent({
@@ -69,7 +69,7 @@ export default function NewStudentScreen() {
         keyboardType="phone-pad"
       />
       <TextField
-        label="Rate per session ($)"
+        label="Rate per hour ($)"
         value={rate}
         onChangeText={setRate}
         placeholder="e.g. 40"

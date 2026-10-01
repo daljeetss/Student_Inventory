@@ -33,6 +33,8 @@ export interface Occurrence {
    * cause the roster to snap back to the group's current membership. */
   rosterCustomized: boolean;
   attendance: Record<string, AttendanceStatus>;
+  /** See SessionRecord.extraMinutes -- {} when nobody stayed extra. */
+  extraMinutes: Record<string, number>;
   persisted: boolean;
 }
 
@@ -47,7 +49,13 @@ interface AppDataContextValue {
   updateGroup: (id: string, patch: Partial<Omit<ClassGroup, 'id'>>) => void;
 
   getOccurrencesForDate: (date: Date) => Occurrence[];
-  saveAttendance: (occurrence: Occurrence, attendance: Record<string, AttendanceStatus>) => SessionRecord;
+  /** `extraMinutes` (optional): extra time per student on top of the
+   * session's length -- kept only for students marked present. */
+  saveAttendance: (
+    occurrence: Occurrence,
+    attendance: Record<string, AttendanceStatus>,
+    extraMinutes?: Record<string, number>,
+  ) => SessionRecord;
   scheduleMakeup: (params: {
     forRecordId: string;
     studentId: string;
@@ -106,6 +114,9 @@ interface AppDataContextValue {
 export interface BillingRow {
   student: Student;
   sessionsAttended: number;
+  /** Total time attended: each session's length plus any extra time. */
+  minutesAttended: number;
+  /** ratePerSession (per hour) x minutesAttended / 60, to the cent. */
   amountDue: number;
   payment: Payment;
 }
@@ -119,14 +130,19 @@ export interface RangeBillingRow {
    * to, without recomputing it itself. */
   monthRows: BillingRow[];
   totalSessionsAttended: number;
+  totalMinutesAttended: number;
   totalAmountDue: number;
   totalAmountPaid: number;
-  /** Derived the same way a single month's Payment.status is: 'paid' once
-   * totalAmountPaid covers totalAmountDue (including the "nothing was ever
-   * due" case), 'partially-paid' once something's been paid but not
-   * enough, 'unpaid' otherwise. */
-  status: PaymentStatus;
+  /** 'nothing-due' when nothing was attended (and nothing paid) in the
+   * period; otherwise derived the same way a single month's
+   * Payment.status is: 'paid' once totalAmountPaid covers totalAmountDue,
+   * 'partially-paid' once something's been paid but not enough, 'unpaid'
+   * otherwise. */
+  status: BillingStatus;
 }
+
+/** A billing row's status: a Payment's status, plus "nothing to bill". */
+export type BillingStatus = PaymentStatus | 'nothing-due';
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
@@ -284,6 +300,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             studentIds: group.studentIds,
             rosterCustomized: false,
             attendance: {},
+            extraMinutes: {},
             persisted: false,
           });
         }
@@ -317,6 +334,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           studentIds,
           rosterCustomized: !!record.rosterCustomized,
           attendance: record.attendance,
+          extraMinutes: record.extraMinutes ?? {},
           persisted: true,
         });
       }
@@ -328,9 +346,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const saveAttendance = useCallback<AppDataContextValue['saveAttendance']>(
-    (occurrence, attendance) => {
+    (occurrence, attendance, extraMinutes = {}) => {
       const sessions = dataRef.current.sessions;
       const existingIndex = sessions.findIndex((s) => s.id === occurrence.id);
+      // Extra time only means anything for someone who was there.
+      const extra = Object.fromEntries(
+        Object.entries(extraMinutes).filter(([sid, minutes]) => attendance[sid] === 'present' && minutes > 0),
+      );
+      const hasExtra = Object.keys(extra).length > 0;
       const record: SessionRecord = {
         id: occurrence.id,
         date: occurrence.date,
@@ -346,10 +369,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         // SessionRecord.rosterCustomized.
         rosterCustomized: occurrence.rosterCustomized,
         attendance,
+        ...(hasExtra ? { extraMinutes: extra } : {}),
         createdAt: new Date().toISOString(),
       };
+      const withAttendance = (s: SessionRecord): SessionRecord => {
+        const { extraMinutes: _previous, ...rest } = s;
+        return { ...rest, attendance, ...(hasExtra ? { extraMinutes: extra } : {}) };
+      };
       const nextSessions =
-        existingIndex >= 0 ? sessions.map((s, i) => (i === existingIndex ? { ...s, attendance } : s)) : [...sessions, record];
+        existingIndex >= 0 ? sessions.map((s, i) => (i === existingIndex ? withAttendance(s) : s)) : [...sessions, record];
       persistSessions(nextSessions);
       return record;
     },
@@ -392,6 +420,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       const remainingAttendance = Object.fromEntries(
         Object.entries(source.attendance).filter(([sid]) => remainingStudentIds.includes(sid)),
       );
+      const remainingExtra = Object.fromEntries(
+        Object.entries(source.extraMinutes).filter(([sid]) => remainingStudentIds.includes(sid)),
+      );
 
       const movedRecord: SessionRecord = {
         id: makeId('sess'),
@@ -431,6 +462,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
                 // group's full roster (see rosterCustomized's doc comment).
                 rosterCustomized: true,
                 attendance: remainingAttendance,
+                ...(Object.keys(remainingExtra).length > 0 ? { extraMinutes: remainingExtra } : {}),
                 createdAt: new Date().toISOString(),
               } satisfies SessionRecord,
               movedRecord,
@@ -448,10 +480,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       return data.students
         .filter((s) => s.active)
         .map((student) => {
-          const sessionsAttended = data.sessions.filter(
+          // Billed by time: each attended session's length plus any extra
+          // time this student stayed, at their hourly rate.
+          const attended = data.sessions.filter(
             (s) => s.date.startsWith(monthKey) && s.attendance[student.id] === 'present',
-          ).length;
-          const amountDue = sessionsAttended * student.ratePerSession;
+          );
+          const sessionsAttended = attended.length;
+          const minutesAttended = attended.reduce(
+            (sum, s) => sum + s.durationMinutes + (s.extraMinutes?.[student.id] ?? 0),
+            0,
+          );
+          const amountDue = Math.round(((student.ratePerSession * minutesAttended) / 60) * 100) / 100;
 
           let payment = data.payments.find((p) => p.studentId === student.id && p.month === monthKey);
           if (!payment) {
@@ -476,7 +515,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             payment = { ...payment, amountDue };
           }
 
-          return { student, sessionsAttended, amountDue, payment };
+          return { student, sessionsAttended, minutesAttended, amountDue, payment };
         });
     },
     [data],
@@ -543,16 +582,31 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           // stays correct even if that ever changes.
           const monthRows = perMonth.map((rows) => rows.find((r) => r.student.id === student.id)!);
           const totalSessionsAttended = monthRows.reduce((sum, r) => sum + r.sessionsAttended, 0);
-          const totalAmountDue = monthRows.reduce((sum, r) => sum + r.amountDue, 0);
+          const totalMinutesAttended = monthRows.reduce((sum, r) => sum + r.minutesAttended, 0);
+          const totalAmountDue = Math.round(monthRows.reduce((sum, r) => sum + r.amountDue, 0) * 100) / 100;
           const totalAmountPaid = monthRows.reduce((sum, r) => sum + r.payment.amountPaid, 0);
-          const status: PaymentStatus =
-            totalAmountDue === 0 || totalAmountPaid >= totalAmountDue
-              ? 'paid'
-              : totalAmountPaid > 0
-                ? 'partially-paid'
-                : 'unpaid';
+          // $0 due with nothing paid is its own status, never "paid" --
+          // otherwise a month with no classes attended yet (e.g. the 1st)
+          // shows everyone as Paid, as if last month carried over.
+          const status: BillingStatus =
+            totalAmountDue === 0 && totalAmountPaid === 0
+              ? 'nothing-due'
+              : totalAmountPaid >= totalAmountDue
+                ? 'paid'
+                : totalAmountPaid > 0
+                  ? 'partially-paid'
+                  : 'unpaid';
 
-          return { student, monthKeys, monthRows, totalSessionsAttended, totalAmountDue, totalAmountPaid, status };
+          return {
+            student,
+            monthKeys,
+            monthRows,
+            totalSessionsAttended,
+            totalMinutesAttended,
+            totalAmountDue,
+            totalAmountPaid,
+            status,
+          };
         });
     },
     [data.students, getMonthlyBilling],

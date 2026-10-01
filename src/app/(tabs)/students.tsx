@@ -22,7 +22,7 @@ function StudentCard({ student }: { student: Student }) {
         Grade {student.grade} · Parent: {student.parentName}
       </ThemedText>
       <ThemedText type="small" themeColor="textSecondary">
-        ${student.ratePerSession.toFixed(2)} / session
+        ${student.ratePerSession.toFixed(2)} / hour
       </ThemedText>
     </Card>
   );

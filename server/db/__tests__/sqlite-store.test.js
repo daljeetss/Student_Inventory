@@ -109,7 +109,7 @@ describe('a new, empty store', () => {
     expect(tables).toEqual(
       expect.arrayContaining(['students', 'classes', 'class_students', 'class_slots', 'sessions', 'session_students', 'payments']),
     );
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(1);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(2);
   });
 });
 
@@ -149,6 +149,32 @@ describe('round-tripping every kind of record exactly', () => {
     for (const s of [regular, shrunk, makeup]) await store.putRecord('sessions', s.id, s, null);
 
     expect(withoutVersion(store.getResource('sessions'))).toEqual([regular, shrunk, makeup]);
+    store.close();
+  });
+
+  it('sessions with extra time for some students', async () => {
+    const store = openStore(dataDir);
+    for (const id of ['s1', 's2']) await store.putRecord('students', id, student(id), null);
+    await store.putRecord('classes', 'c', klass('c', ['s1', 's2']), null);
+    const s = session('c_2026-10-05_16:00', 'c', ['s1', 's2'], { s1: 'present', s2: 'present' }, { extraMinutes: { s1: 30 } });
+    await store.putRecord('sessions', s.id, s, null);
+    expect(withoutVersion(store.getResource('sessions'))).toEqual([s]);
+
+    // Removing the extra time removes it, rather than leaving a stale value.
+    const { extraMinutes, ...without } = s;
+    await store.putRecord('sessions', s.id, without, 1);
+    expect(withoutVersion(store.getResource('sessions'))).toEqual([without]);
+    store.close();
+  });
+
+  it('rejects extra time that is not whole minutes above zero', async () => {
+    const store = openStore(dataDir);
+    await store.putRecord('students', 's1', student('s1'), null);
+    for (const bad of [{ s1: 0 }, { s1: -30 }, { s1: 12.5 }, { s1: '30' }, [30]]) {
+      await expect(
+        store.putRecord('sessions', 'x', session('x', null, ['s1'], { s1: 'present' }, { extraMinutes: bad }), null),
+      ).rejects.toThrow(ValidationError);
+    }
     store.close();
   });
 
@@ -317,7 +343,7 @@ describe('upgrading an old (v0) database', () => {
     openStore(dataDir).close();
 
     const backups = fs.readdirSync(path.join(dataDir, 'backups'));
-    const pre = backups.find((f) => f.startsWith('pre-migration-v1-'));
+    const pre = backups.find((f) => f.startsWith('pre-migration-v'));
     expect(pre).toBeTruthy();
     const snap = new DatabaseSync(path.join(dataDir, 'backups', pre), { readOnly: true });
     expect(snap.prepare('SELECT COUNT(*) AS n FROM records').get().n).toBe(6);
@@ -367,6 +393,51 @@ describe('upgrading an old (v0) database', () => {
     makeV0Database(dataDir, { ...v0, classes: [withRoom] });
     expect(() => openStore(dataDir)).toThrow(/Unknown schedule field/);
     expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(0);
+  });
+});
+
+describe('upgrading a v1 database (real tables, before extra time) to v2', () => {
+  const { SCHEMA_V1 } = require('../sqlite-store');
+
+  function makeV1Database(dir) {
+    const db = new DatabaseSync(path.join(dir, 'tutoring.db'));
+    db.exec(SCHEMA_V1);
+    db.exec(`
+      INSERT INTO students (id, name, grade, parent_name, parent_phone, rate_per_session, active, created_at, version, seq)
+        VALUES ('s1', 'Ava', '3', 'Priya', '1555', 30, 1, '2026-09-01', 4, 0);
+      INSERT INTO sessions (id, date, start_time, duration_minutes, group_id, is_makeup, created_at, version, seq)
+        VALUES ('x', '2026-09-08', '16:00', 60, NULL, 0, '2026-09-08', 2, 0);
+      INSERT INTO session_students (session_id, student_id, roster_position, attendance) VALUES ('x', 's1', 0, 'present');
+      PRAGMA user_version = 1;
+    `);
+    db.close();
+  }
+
+  it('adds the extra-time column without touching existing data or versions', async () => {
+    makeV1Database(dataDir);
+    const store = openStore(dataDir);
+    expect(store.getResource('students')).toEqual([expect.objectContaining({ id: 's1', name: 'Ava', _version: 4 })]);
+    expect(store.getResource('sessions')).toEqual([
+      expect.objectContaining({ id: 'x', attendance: { s1: 'present' }, studentIds: ['s1'], _version: 2 }),
+    ]);
+    expect(store.getResource('sessions')[0].extraMinutes).toBeUndefined();
+
+    // And extra time can now be saved.
+    const { _version, ...x } = store.getResource('sessions')[0];
+    expect(await store.putRecord('sessions', 'x', { ...x, extraMinutes: { s1: 30 } }, 2)).toEqual({ ok: true, version: 3 });
+    expect(store.getResource('sessions')[0].extraMinutes).toEqual({ s1: 30 });
+    store.close();
+
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(2);
+    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v2-'))).toBe(true);
+  });
+
+  it('refuses to open a database from a newer version of the app', () => {
+    makeV1Database(dataDir);
+    const db = new DatabaseSync(path.join(dataDir, 'tutoring.db'));
+    db.exec('PRAGMA user_version = 99');
+    db.close();
+    expect(() => openStore(dataDir)).toThrow(/newer than this version/);
   });
 });
 

@@ -105,3 +105,17 @@ export function formatDateLabel(key: string): string {
 export function dateInMonth(dateKey: string, monthKey: string): boolean {
   return dateKey.startsWith(monthKey);
 }
+
+/** "1 hr", "1.5 hrs", "4.75 hrs" -- for billing, which is rate x hours. */
+export function formatHours(minutes: number): string {
+  const hours = Math.round((minutes / 60) * 100) / 100;
+  return `${hours} ${hours === 1 ? 'hr' : 'hrs'}`;
+}
+
+/** "30 min", "1 hr", "1 hr 30 min" -- for a length of time like extra time. */
+export function formatMinutes(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} min`;
+  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+}

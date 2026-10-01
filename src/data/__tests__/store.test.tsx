@@ -635,6 +635,84 @@ describe('AppDataProvider / useAppData', () => {
       expect(row.payment.messageSentAt).toBeTruthy();
     });
 
+    // Billing is by time: rate (per hour) x (session length + extra time).
+    describe('time-based billing', () => {
+      it('bills ordinary 1-hour sessions exactly as before (rate x sessions)', async () => {
+        const { result } = await setupBillingScenario();
+        const row = result.current.getMonthlyBilling('2026-09')[0];
+        expect(row.minutesAttended).toBe(120);
+        expect(row.amountDue).toBe(80); // 2 x 1 hr x $40
+      });
+
+      it('bills a 1.5-hour class as 1.5 hours', async () => {
+        const { result } = await setup();
+        let student: { id: string } | undefined;
+        await act(async () => {
+          student = result.current.addStudent({
+            name: 'Zoe', grade: '5', parentName: 'Kim', parentPhone: '1555', ratePerSession: 30, active: true,
+          });
+        });
+        await act(async () => {
+          result.current.addGroup({
+            name: 'Long Tuesday', type: 'one-on-one', studentIds: [student!.id],
+            schedule: [{ dayOfWeek: 2, startTime: '16:00', durationMinutes: 90 }], active: true,
+          });
+        });
+        const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 1))[0];
+        expect(occ.durationMinutes).toBe(90);
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student!.id]: 'present' });
+        });
+        const row = result.current.getMonthlyBilling('2026-09')[0];
+        expect(row.minutesAttended).toBe(90);
+        expect(row.amountDue).toBe(45); // 1.5 hrs x $30
+      });
+
+      it('adds a student\'s extra time to their bill, and only theirs', async () => {
+        const { result, student } = await setupBillingScenario(); // Sept 1 + Sept 8, 1 hr each, $40/hr
+        const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'present' }, { [student.id]: 30 });
+        });
+        const saved = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];
+        expect(saved.extraMinutes).toEqual({ [student.id]: 30 });
+        const row = result.current.getMonthlyBilling('2026-09')[0];
+        expect(row.minutesAttended).toBe(150);
+        expect(row.amountDue).toBe(100); // 2.5 hrs x $40
+        expect(result.current.getBillingForRange('2026-09', '2026-09')[0].totalMinutesAttended).toBe(150);
+      });
+
+      it('drops extra time for anyone not marked present, and can remove it again', async () => {
+        const { result, student } = await setupBillingScenario();
+        const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'absent' }, { [student.id]: 60 });
+        });
+        expect(result.current.data.sessions.find((s) => s.id === occ.id)!.extraMinutes).toBeUndefined();
+
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'present' }, { [student.id]: 60 });
+        });
+        expect(result.current.getMonthlyBilling('2026-09')[0].amountDue).toBe(120); // 1 hr + (1 hr + 1 hr extra)
+
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'present' }, {});
+        });
+        expect(result.current.data.sessions.find((s) => s.id === occ.id)!.extraMinutes).toBeUndefined();
+        expect(result.current.getMonthlyBilling('2026-09')[0].amountDue).toBe(80);
+      });
+
+      it('keeps a session\'s recorded length even if the class schedule changes later', async () => {
+        const { result } = await setupBillingScenario();
+        const groupId = result.current.data.groups[0].id;
+        await act(async () => {
+          result.current.updateGroup(groupId, { schedule: [{ dayOfWeek: 2, startTime: '16:00', durationMinutes: 90 }] });
+        });
+        // Already-marked September sessions were 1 hr and stay 1 hr.
+        expect(result.current.getMonthlyBilling('2026-09')[0].amountDue).toBe(80);
+      });
+    });
+
     // Billing's "combine months" feature: totals a student's billing across
     // several months at once instead of just the one currently selected.
     describe('range billing (combine months)', () => {
@@ -737,6 +815,24 @@ describe('AppDataProvider / useAppData', () => {
 
         expect(result.current.getMonthlyBilling('2026-09')[0].payment.messageSentAt).toBeTruthy();
         expect(result.current.getMonthlyBilling('2026-10')[0].payment.messageSentAt).toBeTruthy();
+      });
+
+      // Regression: a month with no classes attended yet (e.g. the 1st of
+      // the month) used to show every student as "Paid" -- $0 due was
+      // treated as fully paid, which reads as if last month's payment
+      // carried over. It must be its own neutral "nothing due" status.
+      it('shows a month with nothing attended as nothing-due, not paid -- even right after a paid month', async () => {
+        const { result, student } = await setupTwoMonthBillingScenario();
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-10', '2026-10', 0, 'full'); // October paid
+        });
+
+        const november = result.current.getBillingForRange('2026-11', '2026-11')[0];
+        expect(november.totalAmountDue).toBe(0);
+        expect(november.status).toBe('nothing-due');
+
+        // A range that includes the paid month is still "paid".
+        expect(result.current.getBillingForRange('2026-10', '2026-11')[0].status).toBe('paid');
       });
 
       it("doesn't touch a month outside the requested range", async () => {

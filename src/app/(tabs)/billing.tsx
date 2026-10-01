@@ -9,23 +9,24 @@ import { ChipSelect } from '@/components/ui/chip-select';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
 import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
-import { addMonths, monthRangeLabel, formatTime, toMonthKey } from '@/data/date';
+import { addMonths, formatHours, formatTime, monthRangeLabel, toMonthKey } from '@/data/date';
 import { groupStudentsBySchedule } from '@/data/schedule-grouping';
-import { RangeBillingRow, useAppData } from '@/data/store';
-import { PaymentStatus } from '@/data/types';
+import { BillingStatus, RangeBillingRow, useAppData } from '@/data/store';
 import { alert } from '@/utils/alert';
 import { buildDueMessageForRange } from '@/data/whatsapp';
 
-const STATUS_TONE: Record<PaymentStatus, 'primary' | 'warning' | 'danger'> = {
+const STATUS_TONE: Record<BillingStatus, 'primary' | 'warning' | 'danger' | 'textSecondary'> = {
   paid: 'primary',
   'partially-paid': 'warning',
   unpaid: 'danger',
+  'nothing-due': 'textSecondary',
 };
 
-const STATUS_LABEL: Record<PaymentStatus, string> = {
+const STATUS_LABEL: Record<BillingStatus, string> = {
   paid: 'Paid',
   'partially-paid': 'Partially paid',
   unpaid: 'Unpaid',
+  'nothing-due': 'Nothing due',
 };
 
 // '1' (the default) is a plain single month -- everything below degenerates
@@ -82,8 +83,9 @@ function BillingRowCard({
         <Badge label={STATUS_LABEL[row.status]} tone={STATUS_TONE[row.status]} />
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        {row.totalSessionsAttended} session{row.totalSessionsAttended === 1 ? '' : 's'} × $
-        {row.student.ratePerSession.toFixed(2)} = ${row.totalAmountDue.toFixed(2)}
+        {row.totalSessionsAttended} session{row.totalSessionsAttended === 1 ? '' : 's'} ·{' '}
+        {formatHours(row.totalMinutesAttended)} × ${row.student.ratePerSession.toFixed(2)}/hr = $
+        {row.totalAmountDue.toFixed(2)}
       </ThemedText>
       {row.totalAmountPaid > 0 && (
         <ThemedText type="small" themeColor="textSecondary">
@@ -105,7 +107,14 @@ function BillingRowCard({
           <WhatsAppSendButton
             students={[row.student]}
             buildMessage={() =>
-              buildDueMessageForRange(row.student, fromMonthKey, toMonthKey, row.totalSessionsAttended, row.totalAmountDue)
+              buildDueMessageForRange(
+                row.student,
+                fromMonthKey,
+                toMonthKey,
+                row.totalSessionsAttended,
+                row.totalMinutesAttended,
+                row.totalAmountDue,
+              )
             }
             onSent={() => onMessageSent(row)}
           />

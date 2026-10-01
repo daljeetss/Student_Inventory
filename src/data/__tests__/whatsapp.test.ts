@@ -21,36 +21,40 @@ describe('normalizePhone', () => {
 });
 
 describe('buildDueMessage', () => {
-  it('includes the parent name, month, session count, rate, and total', () => {
-    const msg = buildDueMessage(student, '2026-08', 3, 120);
+  it('includes the parent name, month, sessions, hours, hourly rate, and total', () => {
+    const msg = buildDueMessage(student, '2026-08', 3, 180, 120);
     expect(msg).toContain('Priya');
     expect(msg).toContain('Ava');
     expect(msg).toContain('August 2026');
     expect(msg).toContain('$120.00');
-    expect(msg).toContain('3 sessions');
-    expect(msg).toContain('$40.00');
+    expect(msg).toContain('3 sessions, 3 hours x $40.00/hour');
   });
 
-  it('uses singular "session" for exactly one', () => {
-    const msg = buildDueMessage(student, '2026-08', 1, 40);
-    expect(msg).toContain('1 session ');
+  it('shows fractional hours from a 1.5-hour class or extra time', () => {
+    expect(buildDueMessage(student, '2026-08', 2, 150, 100)).toContain('2 sessions, 2.5 hours x $40.00/hour');
+  });
+
+  it('uses singular "session" and "hour" for exactly one', () => {
+    const msg = buildDueMessage(student, '2026-08', 1, 60, 40);
+    expect(msg).toContain('1 session, 1 hour x');
     expect(msg).not.toContain('1 sessions');
+    expect(msg).not.toContain('1 hours');
   });
 });
 
 describe('buildDueMessageForRange', () => {
   it('names the combined range and the combined total', () => {
-    const msg = buildDueMessageForRange(student, '2026-07', '2026-09', 9, 360);
-    expect(msg).toContain('Priya');
-    expect(msg).toContain('Ava');
+    const msg = buildDueMessageForRange(student, '2026-07', '2026-09', 9, 540, 360);
     expect(msg).toContain('July');
     expect(msg).toContain('September 2026');
     expect(msg).toContain('$360.00');
-    expect(msg).toContain('9 sessions');
+    expect(msg).toContain('9 sessions, 9 hours');
   });
 
   it('reads identically to buildDueMessage for a single-month "range"', () => {
-    expect(buildDueMessageForRange(student, '2026-08', '2026-08', 3, 120)).toBe(buildDueMessage(student, '2026-08', 3, 120));
+    expect(buildDueMessageForRange(student, '2026-08', '2026-08', 3, 180, 120)).toBe(
+      buildDueMessage(student, '2026-08', 3, 180, 120),
+    );
   });
 });
 

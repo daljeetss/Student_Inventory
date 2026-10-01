@@ -3,17 +3,25 @@ import { Linking } from 'react-native';
 import { monthKeyLabel, monthRangeLabel } from '@/data/date';
 import { Student } from '@/data/types';
 
+/** "(4 sessions, 4.5 hours x $30.00/hour)" -- billing is by time. */
+function breakdown(student: Student, sessionsAttended: number, minutesAttended: number): string {
+  const hours = Math.round((minutesAttended / 60) * 100) / 100;
+  return (
+    `${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'}, ` +
+    `${hours} hour${hours === 1 ? '' : 's'} x $${student.ratePerSession.toFixed(2)}/hour`
+  );
+}
+
 export function buildDueMessage(
   student: Student,
   monthKey: string,
   sessionsAttended: number,
+  minutesAttended: number,
   amountDue: number,
 ): string {
-  const monthLabel = monthKeyLabel(monthKey);
   return (
-    `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${monthLabel} ` +
-    `is $${amountDue.toFixed(2)} (${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'} x ` +
-    `$${student.ratePerSession.toFixed(2)}). Thank you!`
+    `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${monthKeyLabel(monthKey)} ` +
+    `is $${amountDue.toFixed(2)} (${breakdown(student, sessionsAttended, minutesAttended)}). Thank you!`
   );
 }
 
@@ -25,13 +33,13 @@ export function buildDueMessageForRange(
   fromMonthKey: string,
   toMonthKey: string,
   sessionsAttended: number,
+  minutesAttended: number,
   amountDue: number,
 ): string {
-  const label = monthRangeLabel(fromMonthKey, toMonthKey);
   return (
-    `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${label} ` +
-    `is $${amountDue.toFixed(2)} (${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'} x ` +
-    `$${student.ratePerSession.toFixed(2)}). Thank you!`
+    `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ` +
+    `${monthRangeLabel(fromMonthKey, toMonthKey)} is $${amountDue.toFixed(2)} ` +
+    `(${breakdown(student, sessionsAttended, minutesAttended)}). Thank you!`
   );
 }
 

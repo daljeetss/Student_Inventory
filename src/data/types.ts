@@ -11,7 +11,9 @@ export interface Student {
   parentName: string;
   /** E.164-ish digits only, no '+', e.g. "15551234567". Used to build wa.me links. */
   parentPhone: string;
-  /** Dollars charged per session attended by this student. */
+  /** Dollars charged per HOUR attended by this student (billing is
+   * rate x hours -- see getMonthlyBilling). Named "per session" from when
+   * every session was one hour; the meaning didn't change for those. */
   ratePerSession: number;
   notes?: string;
   active: boolean;
@@ -62,6 +64,10 @@ export interface SessionRecord {
    * deliberate roster reduction, so this flag opts a record out of it. */
   rosterCustomized?: boolean;
   attendance: Record<string, AttendanceStatus>;
+  /** Extra time (minutes, in 30-minute steps from the UI) a student stayed
+   * beyond `durationMinutes` -- billed on top of it. Only students with
+   * extra time are listed; omitted entirely when nobody has any. */
+  extraMinutes?: Record<string, number>;
   notes?: string;
   createdAt: string;
 }

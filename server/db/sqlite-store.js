@@ -14,9 +14,13 @@
  *         sessions + session_students, payments), foreign keys between
  *         them, and per-record saves with a `version` on every row so two
  *         devices can't silently overwrite each other (see putRecord).
+ *   v2 -- session_students.extra_minutes: extra time a student stayed
+ *         beyond a session's scheduled length (SessionRecord.extraMinutes),
+ *         billed along with it.
  *
- * Moving v0 -> v1 happens automatically the first time this opens an old
- * database (see migrateToV1). It's built to never lose data: it snapshots
+ * Moving v0 -> latest happens automatically the first time this opens an
+ * old database (see migrateFromLegacy); a v1 database just gets the newer
+ * additions (see upgradeSchema). It's built to never lose data: it snapshots
  * the whole database first (a never-pruned backups/pre-migration-v1-*.db),
  * copies everything into the new tables inside one transaction, then reads
  * every single record back and compares it to the original -- and if even
@@ -29,7 +33,7 @@ const { DatabaseSync, backup } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest per-save snapshots get pruned
 const PRE_MIGRATION_PREFIX = 'pre-migration-'; // never pruned
 
@@ -44,7 +48,7 @@ const KNOWN_FIELDS = {
   classes: ['id', 'name', 'type', 'studentIds', 'schedule', 'active', 'createdAt'],
   sessions: [
     'id', 'date', 'startTime', 'durationMinutes', 'groupId', 'isMakeup', 'makeupForRecordId',
-    'studentIds', 'rosterCustomized', 'attendance', 'notes', 'createdAt',
+    'studentIds', 'rosterCustomized', 'attendance', 'extraMinutes', 'notes', 'createdAt',
   ],
   payments: ['id', 'studentId', 'month', 'amountDue', 'amountPaid', 'status', 'datePaid', 'messageSentAt', 'createdAt'],
 };
@@ -145,6 +149,13 @@ const SCHEMA_V1 = `
   CREATE INDEX payments_by_student_month ON payments(student_id, month);
 `;
 
+// Each later schema version's changes, applied in order on top of v1. Only
+// ever additive (new columns/tables), so upgrading never rewrites data.
+const SCHEMA_UPGRADES = {
+  2: `ALTER TABLE session_students ADD COLUMN extra_minutes INTEGER
+        CHECK (extra_minutes IS NULL OR extra_minutes > 0)`,
+};
+
 /** A problem with the data a client sent (bad shape, or a link to a
  * student/class that doesn't exist) -- the server answers 400, not 500. */
 class ValidationError extends Error {}
@@ -199,6 +210,13 @@ function validate(resource, record) {
     for (const id of record.studentIds) if (typeof id !== 'string') throw new ValidationError('studentIds must be strings');
     if (!record.attendance || typeof record.attendance !== 'object' || Array.isArray(record.attendance)) {
       throw new ValidationError('attendance must be an object');
+    }
+    if (record.extraMinutes !== undefined) {
+      const extra = record.extraMinutes;
+      if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new ValidationError('extraMinutes must be an object');
+      for (const minutes of Object.values(extra)) {
+        if (!Number.isInteger(minutes) || minutes <= 0) throw new ValidationError('extraMinutes values must be whole minutes above 0');
+      }
     }
   } else if (resource === 'payments') {
     check(record, 'studentId', 'string');
@@ -294,12 +312,13 @@ function createSqliteStore(dataDir) {
         optionalBool(s.rosterCustomized), orNull(s.notes), s.createdAt, extraOf('sessions', s), version, seq);
       db.prepare('DELETE FROM session_students WHERE session_id = ?').run(s.id);
       const add = db.prepare(
-        'INSERT INTO session_students (session_id, student_id, roster_position, attendance) VALUES (?, ?, ?, ?)',
+        'INSERT INTO session_students (session_id, student_id, roster_position, attendance, extra_minutes) VALUES (?, ?, ?, ?, ?)',
       );
-      const involved = new Set([...s.studentIds, ...Object.keys(s.attendance)]);
+      const extra = s.extraMinutes ?? {};
+      const involved = new Set([...s.studentIds, ...Object.keys(s.attendance), ...Object.keys(extra)]);
       for (const sid of involved) {
         const pos = s.studentIds.indexOf(sid);
-        add.run(s.id, sid, pos >= 0 ? pos : null, orNull(s.attendance[sid]));
+        add.run(s.id, sid, pos >= 0 ? pos : null, orNull(s.attendance[sid]), orNull(extra[sid]));
       }
     },
 
@@ -378,6 +397,8 @@ function createSqliteStore(dataDir) {
           .map((p) => p.student_id);
         const attendance = {};
         for (const p of people) if (p.attendance !== null) attendance[p.student_id] = p.attendance;
+        const extraMinutes = {};
+        for (const p of people) if (p.extra_minutes != null) extraMinutes[p.student_id] = p.extra_minutes;
         return {
           record: withExtra(
             {
@@ -391,6 +412,7 @@ function createSqliteStore(dataDir) {
               studentIds,
               ...(r.roster_customized !== null ? { rosterCustomized: r.roster_customized === 1 } : {}),
               attendance,
+              ...(Object.keys(extraMinutes).length > 0 ? { extraMinutes } : {}),
               ...(r.notes !== null ? { notes: r.notes } : {}),
               createdAt: r.created_at,
             },
@@ -501,21 +523,30 @@ function createSqliteStore(dataDir) {
     return source;
   }
 
-  function migrateToV1() {
+  /** Snapshot before an upgrade changes anything -- kept forever. */
+  function preUpgradeSnapshot() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = snapshotSync(`${PRE_MIGRATION_PREFIX}v${SCHEMA_VERSION}-${stamp}.db`);
+    console.log(`[tutoring-tracker] Saved a pre-upgrade copy of your data: ${dest}`);
+  }
+
+  const applySchemaUpgrades = (fromVersion) => {
+    for (let v = fromVersion + 1; v <= SCHEMA_VERSION; v++) db.exec(SCHEMA_UPGRADES[v]);
+  };
+
+  /** v0 (or older JSON files) -> latest: copy everything into the real
+   * tables, then verify every record before committing. */
+  function migrateFromLegacy() {
     const source = readLegacySource();
     const total = RESOURCES.reduce((n, r) => n + source[r].length, 0);
 
-    // Snapshot first, before anything changes -- kept forever.
-    if (!isNewDatabase) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const dest = snapshotSync(`${PRE_MIGRATION_PREFIX}v1-${stamp}.db`);
-      console.log(`[tutoring-tracker] Saved a pre-upgrade copy of your data: ${dest}`);
-    }
+    if (!isNewDatabase) preUpgradeSnapshot();
 
     db.exec('BEGIN IMMEDIATE');
     try {
       db.exec('PRAGMA defer_foreign_keys = ON'); // insert order doesn't matter; links are checked at COMMIT
       db.exec(SCHEMA_V1);
+      applySchemaUpgrades(1);
       for (const resource of RESOURCES) {
         source[resource].forEach((record, i) => {
           validate(resource, record);
@@ -560,7 +591,36 @@ function createSqliteStore(dataDir) {
     }
   }
 
-  if (db.prepare('PRAGMA user_version').get().user_version < SCHEMA_VERSION) migrateToV1();
+  /** v1+ -> latest: the later upgrades are only additive (new columns), so
+   * there's nothing to copy or re-verify -- just snapshot, then apply them
+   * in one transaction (all or nothing). */
+  function upgradeSchema(fromVersion) {
+    preUpgradeSnapshot();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      applySchemaUpgrades(fromVersion);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec('COMMIT');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      db.close();
+      throw new Error(`Database upgrade stopped, nothing was changed: ${err.message}. Your data is untouched in ${dbPath}.`);
+    }
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    console.log(`[tutoring-tracker] Upgraded the database from schema v${fromVersion} to v${SCHEMA_VERSION}.`);
+  }
+
+  const currentVersion = db.prepare('PRAGMA user_version').get().user_version;
+  if (currentVersion === 0) migrateFromLegacy();
+  else if (currentVersion < SCHEMA_VERSION) upgradeSchema(currentVersion);
+  else if (currentVersion > SCHEMA_VERSION) {
+    db.close();
+    throw new Error(`This database (schema v${currentVersion}) is newer than this version of the app (v${SCHEMA_VERSION}). Update the app.`);
+  }
 
   // ---------- the public contract (see store.js) ----------
 
@@ -654,4 +714,4 @@ function createSqliteStore(dataDir) {
   return { getResource, putRecord, deleteRecord, close };
 }
 
-module.exports = { createSqliteStore, ValidationError, RESOURCES, canonical };
+module.exports = { createSqliteStore, ValidationError, RESOURCES, canonical, SCHEMA_V1 };

@@ -558,10 +558,37 @@ purpose — their outputs differ enough (per-class vs. per-class-with-
 filtered-students) that forcing one abstraction over both would cost more
 clarity than the few shared lines are worth.
 
+### Billing is by time, not by session count
+
+A student's `ratePerSession` is an **hourly** rate (the field name dates
+from when every session was one hour — for those, nothing changed; every
+real session up to the switch was 60 minutes, verified on the real data,
+so no past bill moved). `getMonthlyBilling` totals, per student, each
+attended session's `durationMinutes` plus that student's
+`extraMinutes[studentId]`, and bills `rate × minutes / 60`, rounded to the
+cent (`BillingRow.minutesAttended`, `RangeBillingRow.totalMinutesAttended`).
+
+- **Session length** is recorded on each `SessionRecord` when it's saved,
+  from the class slot it came from. A 90-minute slot bills 1.5 hours.
+  Editing a class's schedule later doesn't rewrite already-saved sessions
+  — billing history stays what it was — only future ones pick up the new
+  length.
+- **Extra time** (`SessionRecord.extraMinutes`, a map of student id →
+  minutes) is per student, per session: the attendance screen's
+  **− 30 min / + 30 min** buttons (0–4 hours) for anyone marked present.
+  `saveAttendance` drops it for anyone not present and omits the map
+  entirely when empty; the ✓ Saved button counts it as part of what's
+  saved. Stored in `session_students.extra_minutes` (schema v2, an
+  additive column — see "Upgrading" above; v1 databases get it via
+  `upgradeSchema`, after a never-pruned `pre-migration-v2-*.db` snapshot).
+- **Nothing due ≠ paid.** A period with $0 due and $0 paid has its own
+  `'nothing-due'` status (badge "Nothing due"), so the start of a month
+  doesn't show everyone as Paid.
+
 ### Billing: why the Payment id is deterministic
 
-`getMonthlyBilling(monthKey)` computes each active student's sessions
-attended × rate for that month, and creates a `Payment` row for one if it
+`getMonthlyBilling(monthKey)` computes each active student's time
+attended × hourly rate for that month, and creates a `Payment` row for one if it
 doesn't exist yet. That computation reruns constantly (any time the
 Billing screen renders). The `Payment.id` for a not-yet-saved row is
 `pay_<studentId>_<monthKey>` — deliberately **not** a random id.
