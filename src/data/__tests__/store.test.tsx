@@ -15,8 +15,12 @@ import { AppDataProvider, useAppData } from '@/data/store';
 // server write failure or another device's conflicting save.
 jest.mock('@/data/storage', () => {
   let server: Record<string, unknown[]> = {};
-  let nextOutcome: 'failed' | 'conflict' | null = null;
+  let nextOutcome: 'failed' | 'conflict' | 'forbidden' | null = null;
+  let me: unknown = null;
+  let conflictBy: string | null = null;
   return {
+    loadMe: jest.fn(async () => me),
+    lastConflictBy: jest.fn(() => conflictBy),
     loadResource: jest.fn(async (resource: string) => server[resource] ?? []),
     reloadResource: jest.fn(async (resource: string) => server[resource] ?? []),
     saveChanges: jest.fn(async (resource: string, _prev: unknown[], next: unknown[]) => {
@@ -31,15 +35,24 @@ jest.mock('@/data/storage', () => {
     __reset: () => {
       server = {};
       nextOutcome = null;
+      me = null;
+      conflictBy = null;
+    },
+    __setMe: (value: unknown) => {
+      me = value;
+    },
+    __forbidNextSave: () => {
+      nextOutcome = 'forbidden';
     },
     __failNextSave: () => {
       nextOutcome = 'failed';
     },
     /** The next save is refused because "another device" already saved
      * `serverCopy` for that resource -- which is what a reload returns. */
-    __conflictNextSave: (resource: string, serverCopy: unknown[]) => {
+    __conflictNextSave: (resource: string, serverCopy: unknown[], by: string | null = null) => {
       nextOutcome = 'conflict';
       server[resource] = serverCopy;
+      conflictBy = by;
     },
   };
 });
@@ -48,7 +61,9 @@ jest.mock('@/data/storage', () => {
 const mockStorage: {
   __reset: () => void;
   __failNextSave: () => void;
-  __conflictNextSave: (resource: string, serverCopy: unknown[]) => void;
+  __conflictNextSave: (resource: string, serverCopy: unknown[], by?: string | null) => void;
+  __setMe: (value: unknown) => void;
+  __forbidNextSave: () => void;
 } = require('@/data/storage');
 
 beforeEach(() => {
@@ -147,6 +162,54 @@ describe('AppDataProvider / useAppData', () => {
     expect(alertSpy.mock.calls[0][0]).toMatch(/another device/i);
 
     alertSpy.mockRestore();
+  });
+
+  it('names who saved first in a conflict, when the server says', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { result } = await setup();
+    let ava: { id: string } | undefined;
+    await act(async () => {
+      ava = result.current.addStudent({
+        name: 'Ava', grade: '3', parentName: 'Priya', parentPhone: '1555', ratePerSession: 40, active: true,
+      });
+    });
+    mockStorage.__conflictNextSave('students', [{ ...result.current.data.students[0], ratePerSession: 50 }], 'Priya');
+    await act(async () => {
+      result.current.updateStudent(ava!.id, { ratePerSession: 45 });
+    });
+    await waitFor(() => expect(result.current.data.students[0].ratePerSession).toBe(50));
+    expect(alertSpy.mock.calls[0][0]).toBe('Changed by Priya');
+    alertSpy.mockRestore();
+  });
+
+  it('says so, and reloads, when a login is not allowed to make a change', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { result } = await setup();
+    mockStorage.__forbidNextSave();
+    await act(async () => {
+      result.current.addStudent({
+        name: 'Ava', grade: '3', parentName: 'Priya', parentPhone: '1555', ratePerSession: 40, active: true,
+      });
+    });
+    await waitFor(() => expect(result.current.data.students).toEqual([])); // reloaded: it was never saved
+    expect(alertSpy.mock.calls[0][0]).toMatch(/not allowed/i);
+    alertSpy.mockRestore();
+  });
+
+  describe('who is signed in', () => {
+    it('allows everything when there is no server (dev mode / Expo Go)', async () => {
+      const { result } = await setup();
+      expect(result.current.me).toBeNull();
+      expect(result.current.can('payments:read')).toBe(true);
+    });
+
+    it("only allows what the signed-in person's role permits", async () => {
+      mockStorage.__setMe({ name: 'Priya', role: 'tutor', permissions: ['sessions:read', 'sessions:write'] });
+      const { result } = await setup();
+      expect(result.current.me?.name).toBe('Priya');
+      expect(result.current.can('sessions:write')).toBe(true);
+      expect(result.current.can('payments:read')).toBe(false);
+    });
   });
 
   it('adds and updates a student', async () => {

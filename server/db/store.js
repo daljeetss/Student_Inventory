@@ -11,14 +11,15 @@
  * "students", "classes", "sessions", "payments"):
  *   getResource(resource) -> array
  *     Every record of that resource, each with a `_version` number added.
- *   putRecord(resource, id, record, baseVersion) -> Promise<result>
+ *   putRecord(resource, id, record, baseVersion, { actor }) -> Promise<result>
  *     Creates/updates ONE record -- but only if `baseVersion` matches the
  *     version currently stored (null meaning "I believe it doesn't exist
  *     yet"). Result: { ok: true, version } on success, or
- *     { ok: false, conflict: true, version, current } if another device
+ *     { ok: false, conflict: true, version, current, updatedBy } if another device
  *     saved it first (nothing is written). Throws ValidationError for a
- *     malformed record or a link to something that doesn't exist.
- *   deleteRecord(resource, id, baseVersion) -> Promise<result>
+ *     malformed record or a link to something that doesn't exist. `actor`
+ *     (a control.db user id) is recorded as who last saved the row.
+ *   deleteRecord(resource, id, baseVersion, { actor }) -> Promise<result>
  *     Same version check as putRecord. Already-gone counts as success.
  *   close() -> void
  *     Releases the database (called on server shutdown).

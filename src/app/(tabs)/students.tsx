@@ -11,7 +11,7 @@ import { groupStudentsBySchedule } from '@/data/schedule-grouping';
 import { useAppData } from '@/data/store';
 import { Student } from '@/data/types';
 
-function StudentCard({ student }: { student: Student }) {
+function StudentCard({ student, showRate }: { student: Student; showRate: boolean }) {
   return (
     <Card onPress={() => router.push(`/student/${student.id}`)}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
@@ -21,15 +21,17 @@ function StudentCard({ student }: { student: Student }) {
       <ThemedText type="small" themeColor="textSecondary">
         Grade {student.grade} · Parent: {student.parentName}
       </ThemedText>
-      <ThemedText type="small" themeColor="textSecondary">
-        ${student.ratePerSession.toFixed(2)} / hour
-      </ThemedText>
+      {showRate && (
+        <ThemedText type="small" themeColor="textSecondary">
+          ${student.ratePerSession.toFixed(2)} / hour
+        </ThemedText>
+      )}
     </Card>
   );
 }
 
 export default function StudentsScreen() {
-  const { data, loading } = useAppData();
+  const { data, loading, can } = useAppData();
   const { days, unscheduled, inactive } = groupStudentsBySchedule(data.students, data.groups);
 
   return (
@@ -38,7 +40,7 @@ export default function StudentsScreen() {
         <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
           Students
         </ThemedText>
-        <Button title="+ Add" onPress={() => router.push('/student/new')} />
+        {can('students:write') && <Button title="+ Add" onPress={() => router.push('/student/new')} />}
       </View>
 
       {!loading && data.students.length === 0 && (
@@ -62,7 +64,7 @@ export default function StudentsScreen() {
               </Pressable>
               <View style={{ gap: 10 }}>
                 {cls.students.map((student) => (
-                  <StudentCard key={student.id} student={student} />
+                  <StudentCard key={student.id} student={student} showRate={can('payments:read')} />
                 ))}
               </View>
             </View>
@@ -76,7 +78,7 @@ export default function StudentsScreen() {
             No class scheduled yet
           </ThemedText>
           {unscheduled.map((student) => (
-            <StudentCard key={student.id} student={student} />
+            <StudentCard key={student.id} student={student} showRate={can('payments:read')} />
           ))}
         </View>
       )}
@@ -87,7 +89,7 @@ export default function StudentsScreen() {
             Inactive
           </ThemedText>
           {inactive.map((student) => (
-            <StudentCard key={student.id} student={student} />
+            <StudentCard key={student.id} student={student} showRate={can('payments:read')} />
           ))}
         </View>
       )}

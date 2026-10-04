@@ -245,6 +245,84 @@ describe('data endpoints', () => {
   });
 });
 
+describe('separate logins and roles', () => {
+  const { createControlStore } = require('../db/control-store');
+  let tutorToken;
+  let tutorLinkToRevoke;
+
+  const as = (tok, p, init = {}) =>
+    fetch(`${baseUrl}/api/${p}`, { ...init, headers: { 'X-Dashboard-Token': tok, 'Content-Type': 'application/json' } });
+  const student = (id, extra = {}) => ({
+    id, name: `Student ${id}`, grade: '3', parentName: 'P', parentPhone: '1555', ratePerSession: 30,
+    active: true, createdAt: '2026-09-01', ...extra,
+  });
+
+  beforeAll(() => {
+    // The running server reads the same control.db, per request.
+    const control = createControlStore(dataDir);
+    const priya = control.addUser('Priya', 'tutor');
+    tutorToken = control.createLink(priya.id, "Priya's iPhone").token;
+    tutorLinkToRevoke = control.createLink(priya.id, 'Old phone');
+    control.close();
+  });
+
+  it('the original shared link was imported as an owner, so existing phones keep working', async () => {
+    const me = await (await as(token, 'me')).json();
+    expect(me.role).toBe('owner');
+    expect(me.permissions).toContain('payments:write');
+  });
+
+  it('/api/me tells the app who is signed in and what they may do', async () => {
+    const me = await (await as(tutorToken, 'me')).json();
+    expect(me).toEqual({ name: 'Priya', role: 'tutor', permissions: expect.arrayContaining(['sessions:write']) });
+    expect(me.permissions).not.toContain('payments:read');
+  });
+
+  it('a tutor can read students and classes but gets 403 for payments', async () => {
+    expect((await as(tutorToken, 'students')).status).toBe(200);
+    expect((await as(tutorToken, 'classes')).status).toBe(200);
+    expect((await as(tutorToken, 'payments')).status).toBe(403);
+  });
+
+  it('a tutor can save attendance but not change students or payments', async () => {
+    const put = (p, record) => as(tutorToken, p, { method: 'PUT', body: JSON.stringify({ record, baseVersion: null }) });
+    expect((await put('students/stu_by_tutor', student('stu_by_tutor'))).status).toBe(403);
+    expect((await as(tutorToken, 'students')).status).toBe(200);
+    const s = {
+      id: 'sess_by_tutor', date: '2026-10-05', startTime: '16:00', durationMinutes: 60, groupId: null, isMakeup: true,
+      studentIds: [], attendance: {}, createdAt: '2026-10-05',
+    };
+    expect((await put('sessions/sess_by_tutor', s)).status).toBe(200);
+  });
+
+  it('a conflict says WHO saved first', async () => {
+    const put = (tok, record, baseVersion) =>
+      as(tok, 'students/stu_who', { method: 'PUT', body: JSON.stringify({ record, baseVersion }) });
+    await put(token, student('stu_who'), null); // owner creates (v1)
+    const control = createControlStore(dataDir);
+    const sam = control.addUser('Sam', 'owner');
+    const samToken = control.createLink(sam.id, 'Laptop').token;
+    control.close();
+    await put(samToken, student('stu_who', { name: 'Sam edit' }), 1); // Sam saves v2
+    const stale = await put(token, student('stu_who', { name: 'stale edit' }), 1);
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).updatedBy).toBe('Sam');
+  });
+
+  it('a revoked link is refused immediately', async () => {
+    expect((await as(tutorLinkToRevoke.token, 'me')).status).toBe(200);
+    const control = createControlStore(dataDir);
+    control.revokeLink(tutorLinkToRevoke.id);
+    control.close();
+    expect((await as(tutorLinkToRevoke.token, 'me')).status).toBe(401);
+  });
+
+  it("each person's home-screen manifest opens with their own link", async () => {
+    const res = await fetch(baseUrl + '/manifest.json', { headers: { 'X-Dashboard-Token': tutorToken } });
+    expect((await res.json()).start_url).toBe(`./?token=${tutorToken}`);
+  });
+});
+
 describe('caching headers', () => {
   it('never caches index.html', async () => {
     const res = await fetch(`${baseUrl}/?token=${token}`);

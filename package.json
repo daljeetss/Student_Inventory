@@ -53,8 +53,12 @@
     "test:watch": "jest --watch",
     "backup": "bash server/backup.sh",
     "restore": "bash server/restore.sh",
+    "backup:passphrase": "bash server/backup-passphrase.sh",
+    "backup:schedule": "bash server/backup-schedule.sh",
+    "backup:unschedule": "bash server/backup-schedule.sh remove",
     "db": "node server/db/snapshot.js production/tutoring.db \"${TMPDIR:-/tmp}/tutoring-query.db\" && sqlite3 -header -column \"${TMPDIR:-/tmp}/tutoring-query.db\"",
-    "gdrive-auth": "node server/gdrive-auth.js"
+    "gdrive-auth": "node server/gdrive-auth.js",
+    "users": "node server/users.js"
   },
   "jest": {
     "projects": [

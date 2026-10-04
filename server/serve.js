@@ -17,18 +17,22 @@
  * Usage: npm run serve   (builds the web export, then serves it)
  */
 
-const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
-const os = require('os');
 const path = require('path');
 
+const { createControlStore } = require('./db/control-store');
 const { openStore, ValidationError, RESOURCES } = require('./db/store');
+const { linkUrls, localIp } = require('./links');
+const { can, permissionsFor } = require('./permissions');
 
 const ROOT = path.join(__dirname, '..');
 const DIST_DIR = path.join(ROOT, 'dist');
 const ICONS_DIR = path.join(__dirname, 'icons');
-const TOKEN_FILE = path.join(__dirname, 'access-token.txt');
+// The single shared token from before separate logins. Only read once, on
+// the first start after upgrading, to import it as an owner's link (see
+// control-store.js's importLegacyToken) so no phone gets locked out.
+const LEGACY_TOKEN_FILE = path.join(__dirname, 'access-token.txt');
 
 // All real data lives here (a SQLite database, one row per record -- see
 // server/db/). This folder is not to be touched for testing/experiments,
@@ -61,15 +65,12 @@ const APP_NAME = 'Tutoring Tracker';
 const SHORT_NAME = 'Tutoring';
 const THEME_COLOR = '#2E7D32';
 
-function getOrCreateToken() {
-  if (fs.existsSync(TOKEN_FILE)) {
-    const saved = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (saved) return saved;
-  }
-  const token = crypto.randomBytes(16).toString('base64url');
-  fs.writeFileSync(TOKEN_FILE, token);
-  return token;
-}
+// Someone guessing at tokens gets slowed down: after this many wrong
+// tokens from one address in the window, that address gets 429s until the
+// window passes. (Tokens are 256-bit random, so guessing can't work
+// anyway -- this just keeps the logs quiet and the Mac unbothered.)
+const MAX_FAILED_TOKENS = 20;
+const FAILED_TOKEN_WINDOW_MS = 15 * 60 * 1000;
 
 function readRequestBody(req) {
   return new Promise((resolve, reject) => {
@@ -89,34 +90,16 @@ function readRequestBody(req) {
   });
 }
 
-function localIp() {
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name] ?? []) {
-      if (net.family === 'IPv4' && !net.internal) return net.address;
-    }
-  }
-  return 'localhost';
-}
-
-function timingSafeEqual(a, b) {
-  const bufA = Buffer.from(String(a));
-  const bufB = Buffer.from(String(b));
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
-}
-
-function isAuthorized(req, token) {
+/** Every token a request offers: ?token=, the X-Dashboard-Token header
+ * (what the app sends), and the dash_token cookie. */
+function suppliedTokens(req) {
   const url = new URL(req.url, 'http://internal');
-  const supplied = url.searchParams.get('token') || req.headers['x-dashboard-token'];
-  if (supplied && timingSafeEqual(supplied, token)) return true;
-
-  const cookieHeader = req.headers.cookie || '';
-  for (const part of cookieHeader.split(';')) {
+  const tokens = [url.searchParams.get('token'), req.headers['x-dashboard-token']];
+  for (const part of (req.headers.cookie || '').split(';')) {
     const [k, ...rest] = part.trim().split('=');
-    if (k === 'dash_token' && timingSafeEqual(rest.join('='), token)) return true;
+    if (k === 'dash_token') tokens.push(rest.join('='));
   }
-  return false;
+  return tokens.filter((t) => typeof t === 'string' && t.length > 0);
 }
 
 function buildManifest(token) {
@@ -153,10 +136,10 @@ const UNAUTHORIZED_HTML = `<!doctype html>
 <style>body{font-family:system-ui,sans-serif;padding:40px;line-height:1.6;color:#222}
 code{background:#eee;padding:2px 6px;border-radius:4px}</style></head>
 <body><h2>Unauthorized</h2>
-<p>This app requires an access link.</p>
-<p>Use the full link printed in the terminal when the server started
-(it looks like <code>http://&lt;ip&gt;:${PORT}/?token=...</code>), or check
-<code>server/access-token.txt</code> for the token.</p>
+<p>This app requires a personal access link.</p>
+<p>Ask the owner for yours. (Owner: make one on the Mac running the app with
+<code>npm run users -- link "Name" "Their phone"</code>.) If you had a link
+that stopped working, it may have been turned off.</p>
 <p style="margin-top:40px;color:#888;font-size:12px">${COPYRIGHT_NOTICE}</p>
 </body></html>`;
 
@@ -208,53 +191,118 @@ function main() {
     process.exit(1);
   }
 
-  const token = getOrCreateToken();
   const store = openStore(PRODUCTION_DIR);
+  const control = createControlStore(PRODUCTION_DIR);
+
+  // First start with separate logins: bring the old shared link along as
+  // an owner's link, or -- on a brand-new install -- make the first owner.
+  let firstOwnerLink = null;
+  if (!control.hasUsers()) {
+    const legacy = fs.existsSync(LEGACY_TOKEN_FILE) ? fs.readFileSync(LEGACY_TOKEN_FILE, 'utf8').trim() : '';
+    if (legacy) {
+      control.importLegacyToken(legacy);
+      console.log('[tutoring-tracker] Your existing shared link still works (now as an owner link). Give each person their own -- see "npm run users".');
+    } else {
+      const owner = control.addUser('Owner', 'owner');
+      firstOwnerLink = control.createLink(owner.id, 'First owner link').token;
+    }
+  }
+
+  // Wrong-token attempts per client address (see MAX_FAILED_TOKENS).
+  const failures = new Map();
+  const tooManyFailures = (ip) => {
+    const f = failures.get(ip);
+    if (!f) return false;
+    if (Date.now() - f.since > FAILED_TOKEN_WINDOW_MS) {
+      failures.delete(ip);
+      return false;
+    }
+    return f.count >= MAX_FAILED_TOKENS;
+  };
+  const recordFailure = (ip) => {
+    const f = failures.get(ip);
+    if (!f || Date.now() - f.since > FAILED_TOKEN_WINDOW_MS) failures.set(ip, { count: 1, since: Date.now() });
+    else f.count += 1;
+  };
+
+  /** Who's making this request: { user, token } for a valid, active link;
+   * otherwise null (and wrong tokens are counted against the address). */
+  function authenticateRequest(req) {
+    const tokens = suppliedTokens(req);
+    for (const token of tokens) {
+      const auth = control.authenticate(token);
+      if (auth) return { ...auth, token };
+    }
+    if (tokens.length > 0) recordFailure(req.socket.remoteAddress);
+    return null;
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
-      await handleRequest(req, res, token);
+      await handleRequest(req, res);
     } catch (err) {
       send(res, 500, JSON.stringify({ ok: false, error: String(err && err.message) }), 'application/json');
     }
   });
 
-  async function handleRequest(req, res, token) {
+  async function handleRequest(req, res) {
     const url = new URL(req.url, 'http://internal');
     const pathname = decodeURIComponent(url.pathname);
+    const json = (code, obj) => send(res, code, JSON.stringify(obj), 'application/json', { 'Cache-Control': 'no-store' });
 
-    // Public: manifest + icons, so the OS can fetch them while installing,
-    // before the browser has ever been authorized.
-    if (pathname === '/manifest.json') {
-      const tok = isAuthorized(req, token) ? token : null;
-      return send(res, 200, JSON.stringify(buildManifest(tok)), 'application/manifest+json', { 'Cache-Control': 'no-store' });
-    }
     if (pathname.startsWith('/icons/')) {
       return serveStaticFile(req, res, path.join(ICONS_DIR, path.basename(pathname)));
     }
+    if (tooManyFailures(req.socket.remoteAddress)) {
+      return send(res, 429, 'Too many wrong access links. Try again later.', 'text/plain', { 'Retry-After': '900' });
+    }
 
-    if (!isAuthorized(req, token)) {
+    const auth = authenticateRequest(req);
+
+    // Public: manifest + icons, so the OS can fetch them while installing,
+    // before the browser has ever been authorized. The manifest embeds the
+    // requester's OWN link in start_url (only if they're signed in), so
+    // each person's home-screen icon opens as them.
+    if (pathname === '/manifest.json') {
+      return send(res, 200, JSON.stringify(buildManifest(auth ? auth.token : null)), 'application/manifest+json', {
+        'Cache-Control': 'no-store',
+      });
+    }
+
+    if (!auth) {
       return send(res, 401, UNAUTHORIZED_HTML, 'text/html');
+    }
+    const { user } = auth;
+    const forbidden = () => json(403, { ok: false, error: "Your login doesn't allow this." });
+
+    // Who's signed in, and what they may do -- the app uses this to hide
+    // what someone can't use. The server still checks every request.
+    if (pathname === '/api/me') {
+      return json(200, { name: user.name, role: user.role, permissions: permissionsFor(user.role) });
     }
 
     // The app's data, stored on this computer (in production/tutoring.db)
     // instead of in each device's browser storage -- every device using
     // this server sees the same data. serve.js only ever talks to the
     // store's contract -- see server/db/store.js for why.
-    const json = (code, obj) => send(res, code, JSON.stringify(obj), 'application/json', { 'Cache-Control': 'no-store' });
-
     const recordMatch = pathname.match(RECORD_PATTERN);
     if (recordMatch) {
       const [, resource, id] = recordMatch;
       if (req.method !== 'PUT' && req.method !== 'DELETE') return json(405, { ok: false, error: 'Method not allowed' });
+      if (!can(user.role, `${resource}:write`)) return forbidden();
       try {
         const raw = await readRequestBody(req);
         const body = raw ? JSON.parse(raw) : {};
         const baseVersion = body.baseVersion ?? null;
+        const meta = { actor: user.id };
         const result =
           req.method === 'PUT'
-            ? await store.putRecord(resource, id, body.record, baseVersion)
-            : await store.deleteRecord(resource, id, baseVersion);
+            ? await store.putRecord(resource, id, body.record, baseVersion, meta)
+            : await store.deleteRecord(resource, id, baseVersion, meta);
+        if (!result.ok && result.updatedBy) {
+          // Say who, not just "another device".
+          result.updatedBy = control.getUser(result.updatedBy)?.name ?? null;
+        }
         return json(result.ok ? 200 : 409, result);
       } catch (err) {
         const clientError = err instanceof ValidationError || err instanceof SyntaxError;
@@ -264,6 +312,7 @@ function main() {
 
     const resourceMatch = pathname.match(RESOURCE_PATTERN);
     if (resourceMatch && req.method === 'GET') {
+      if (!can(user.role, `${resourceMatch[1]}:read`)) return forbidden();
       return json(200, store.getResource(resourceMatch[1]));
     }
 
@@ -271,6 +320,7 @@ function main() {
     if (legacyMatch || resourceMatch) {
       const legacy = legacyMatch ? legacyMatch[1] : resourceMatch[1];
       if (req.method === 'GET' && (legacy === 'attendance' || legacy === 'makeup')) {
+        if (!can(user.role, 'sessions:read')) return forbidden();
         const wantMakeup = legacy === 'makeup';
         return json(200, store.getResource('sessions').filter((s) => s.isMakeup === wantMakeup));
       }
@@ -278,12 +328,11 @@ function main() {
       return json(405, { ok: false, error: 'Method not allowed' });
     }
 
-    const suppliedToken = url.searchParams.get('token');
     // First authorized visit via ?token=... : remember it in a cookie so the
     // token doesn't need to stay in the URL (or be re-typed) after this.
     const cookieToSet =
-      suppliedToken && timingSafeEqual(suppliedToken, token)
-        ? `dash_token=${token}; Path=/; Max-Age=31536000; SameSite=Lax`
+      url.searchParams.get('token') === auth.token
+        ? `dash_token=${auth.token}; Path=/; Max-Age=31536000; SameSite=Lax`
         : undefined;
 
     let relative = pathname === '/' ? '/index.html' : pathname;
@@ -297,24 +346,31 @@ function main() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    const ip = localIp();
     console.log('='.repeat(62));
     console.log(`  ${APP_NAME} running`);
     console.log('='.repeat(62));
-    console.log(`  On this computer:  http://localhost:${PORT}/?token=${token}`);
-    console.log(`  From your phone:   http://${ip}:${PORT}/?token=${token}`);
+    if (firstOwnerLink) {
+      console.log('  Your owner link (shown only this once -- save it):');
+      for (const { where, url } of linkUrls(firstOwnerLink, PORT)) console.log(`    ${where}: ${url}`);
+      console.log('');
+    }
+    const legacy = fs.existsSync(LEGACY_TOKEN_FILE) ? fs.readFileSync(LEGACY_TOKEN_FILE, 'utf8').trim() : '';
+    if (legacy && control.authenticate(legacy)) {
+      console.log('  Original shared link (still on -- replace with personal links):');
+      for (const { where, url } of linkUrls(legacy, PORT)) console.log(`    ${where}: ${url}`);
+      console.log('');
+    }
+    console.log('  People and their personal links:   npm run users');
+    console.log(`  Phones on the same Wi-Fi reach it at http://${localIp()}:${PORT}`);
+    console.log('  Open a link once in Safari/Chrome, then "Add to Home Screen".');
     console.log('');
-    console.log('  Phone must be on the same Wi-Fi network as this computer.');
-    console.log('  Open that link once in Safari/Chrome, then use "Add to');
-    console.log('  Home Screen" -- the icon will reopen already signed in.');
-    console.log('');
-    console.log(`  Data:  ${PRODUCTION_DIR}`);
-    console.log(`  Token: server/access-token.txt  (Ctrl+C to stop)`);
+    console.log(`  Data:  ${PRODUCTION_DIR}   (Ctrl+C to stop)`);
     console.log('='.repeat(62));
   });
 
   const shutdown = () => {
     store.close();
+    control.close();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

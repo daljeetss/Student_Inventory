@@ -109,7 +109,7 @@ describe('a new, empty store', () => {
     expect(tables).toEqual(
       expect.arrayContaining(['students', 'classes', 'class_students', 'class_slots', 'sessions', 'session_students', 'payments']),
     );
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(2);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(3);
   });
 });
 
@@ -428,8 +428,8 @@ describe('upgrading a v1 database (real tables, before extra time) to v2', () =>
     expect(store.getResource('sessions')[0].extraMinutes).toEqual({ s1: 30 });
     store.close();
 
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(2);
-    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v2-'))).toBe(true);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(3);
+    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v3-'))).toBe(true);
   });
 
   it('refuses to open a database from a newer version of the app', () => {

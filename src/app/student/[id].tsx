@@ -21,7 +21,7 @@ const GRADE_OPTIONS: { value: Grade; label: string }[] = ['K', '1', '2', '3', '4
 
 export default function StudentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { data, updateStudent } = useAppData();
+  const { data, updateStudent, can } = useAppData();
   const student = data.students.find((s) => s.id === id);
 
   const [editing, setEditing] = useState(false);
@@ -102,10 +102,12 @@ export default function StudentDetailScreen() {
         <ThemedText themeColor="textSecondary">{student.parentPhone}</ThemedText>
       </Card>
 
-      <Card>
-        <ThemedText type="smallBold">Billing</ThemedText>
-        <ThemedText themeColor="textSecondary">${student.ratePerSession.toFixed(2)} / hour</ThemedText>
-      </Card>
+      {can('payments:read') && (
+        <Card>
+          <ThemedText type="smallBold">Billing</ThemedText>
+          <ThemedText themeColor="textSecondary">${student.ratePerSession.toFixed(2)} / hour</ThemedText>
+        </Card>
+      )}
 
       {student.notes && (
         <Card>
@@ -114,18 +116,20 @@ export default function StudentDetailScreen() {
         </Card>
       )}
 
-      <View style={{ flexDirection: 'row', gap: 10 }}>
-        <View style={{ flex: 1 }}>
-          <Button title="Edit" variant="secondary" onPress={() => setEditing(true)} />
+      {can('students:write') && (
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          <View style={{ flex: 1 }}>
+            <Button title="Edit" variant="secondary" onPress={() => setEditing(true)} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Button
+              title={student.active ? 'Mark Inactive' : 'Mark Active'}
+              variant={student.active ? 'danger' : 'primary'}
+              onPress={() => updateStudent(student.id, { active: !student.active })}
+            />
+          </View>
         </View>
-        <View style={{ flex: 1 }}>
-          <Button
-            title={student.active ? 'Mark Inactive' : 'Mark Active'}
-            variant={student.active ? 'danger' : 'primary'}
-            onPress={() => updateStudent(student.id, { active: !student.active })}
-          />
-        </View>
-      </View>
+      )}
 
       <ThemedText type="smallBold" style={{ marginTop: 8 }}>
         Recent sessions

@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { ColorValue, Text } from 'react-native';
 
+import { useAppData } from '@/data/store';
 import { useTheme } from '@/hooks/use-theme';
 
 function TabIcon({ symbol, focused, color }: { symbol: string; focused: boolean; color: ColorValue }) {
@@ -9,6 +10,7 @@ function TabIcon({ symbol, focused, color }: { symbol: string; focused: boolean;
 
 export default function TabLayout() {
   const theme = useTheme();
+  const { can } = useAppData();
 
   return (
     <Tabs
@@ -45,6 +47,9 @@ export default function TabLayout() {
       <Tabs.Screen
         name="billing"
         options={{
+          // Hidden for logins without billing access (e.g. tutors); the
+          // server refuses payment data to them regardless.
+          ...(can('payments:read') ? {} : { href: null }),
           title: 'Billing',
           tabBarIcon: ({ focused, color }) => <TabIcon symbol="💵" focused={focused} color={color} />,
         }}

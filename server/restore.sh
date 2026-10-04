@@ -9,7 +9,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
-PRODUCTION_DIR="$APP_DIR/production"
+# TUTORING_DATA_DIR: same override serve.js has -- for testing only.
+PRODUCTION_DIR="${TUTORING_DATA_DIR:-$APP_DIR/production}"
+KEYCHAIN_SERVICE="${TUTORING_BACKUP_KEYCHAIN_SERVICE:-tutoring-tracker-backup}"
 
 BACKUP_FILE="${1:-}"
 if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
@@ -22,8 +24,16 @@ TMP_EXTRACT="$(mktemp -d -t tutoring-restore-extract)"
 cleanup() { rm -f "$TMP_TAR"; rm -rf "$TMP_EXTRACT"; }
 trap cleanup EXIT
 
-echo "Enter the passphrase this backup was encrypted with:"
-openssl enc -d -aes-256-cbc -pbkdf2 -salt -in "$BACKUP_FILE" -out "$TMP_TAR"
+# Try the passphrase saved in the Keychain first (npm run backup:passphrase);
+# if this backup was made with a different one, ask for it.
+SAVED_PASS="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a backup -w 2>/dev/null || true)"
+if [ -n "$SAVED_PASS" ] && TT_PASS="$SAVED_PASS" openssl enc -d -aes-256-cbc -pbkdf2 -salt -pass env:TT_PASS \
+    -in "$BACKUP_FILE" -out "$TMP_TAR" 2>/dev/null; then
+  echo "Decrypted with the passphrase saved in your Keychain."
+else
+  echo "Enter the passphrase this backup was encrypted with:"
+  openssl enc -d -aes-256-cbc -pbkdf2 -salt -in "$BACKUP_FILE" -out "$TMP_TAR"
+fi
 
 tar -xzf "$TMP_TAR" -C "$TMP_EXTRACT"
 if [ ! -d "$TMP_EXTRACT/production" ]; then
@@ -33,7 +43,7 @@ fi
 
 # Never overwrite real data without a safety copy of what was there first.
 if [ -d "$PRODUCTION_DIR" ]; then
-  SAFETY_DIR="$APP_DIR/production-before-restore-$(date +%Y%m%d-%H%M%S)"
+  SAFETY_DIR="$(dirname "$PRODUCTION_DIR")/$(basename "$PRODUCTION_DIR")-before-restore-$(date +%Y%m%d-%H%M%S)"
   echo "Moving current production/ to $SAFETY_DIR first, just in case."
   mv "$PRODUCTION_DIR" "$SAFETY_DIR"
 fi

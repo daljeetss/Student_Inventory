@@ -16,40 +16,57 @@ There are two ways to get it onto a phone. **Option A is recommended** —
 it installs as a real home-screen icon that opens instantly and doesn't
 need any app installed first.
 
-### Option A: home-screen icon via a local token-gated server (recommended)
+### Option A: home-screen icon via a local server (recommended)
 
 ```
 npm run serve
 ```
 
-This builds the app and starts a small local server, printing something
-like:
+This builds the app and starts a small server on this Mac. **Everyone gets
+their own personal link** (so a lost phone can be cut off on its own, and
+the app knows who changed what):
 
 ```
-On this computer:  http://localhost:8899/?token=puZty2Ygf-hYJCQyPSfMSw
-From your phone:   http://192.168.1.225:8899/?token=puZty2Ygf-hYJCQyPSfMSw
+npm run users -- add "Priya" tutor                 # once per person: owner or tutor
+npm run users -- link "Priya" "Priya's iPhone"     # once per device -- prints the link
 ```
 
-1. Make sure the phone is on the **same Wi-Fi network** as this computer.
-2. Open the "From your phone" link in Safari (iPhone) or Chrome (Samsung) —
-   just once.
+Then, on that phone:
+1. Make sure it's on the **same Wi-Fi** as this Mac (or set up Tailscale, below, to use it anywhere).
+2. Open the link in Safari (iPhone) or Chrome (Samsung) — just once.
 3. Add it to the home screen:
    - **iPhone (Safari):** Share button → "Add to Home Screen"
    - **Samsung (Chrome):** ⋮ menu → "Add to Home screen" / "Install app"
 
-The icon reopens the app full-screen, already signed in — the app saves the
-token from that first link and re-sends it automatically after that, so
-nobody has to type it again. The token itself just keeps this off-limits to
-anyone else on the Wi-Fi network who doesn't have the link; it's saved in
-`server/access-token.txt` if you ever need to look it up. (See
-[DESIGN.md](./DESIGN.md#access-token) for exactly how that works — it's not
-just a cookie, deliberately, because those aren't reliable inside an
-installed home-screen app.)
+The icon reopens the app full-screen, already signed in as that person —
+the footer says who ("Signed in as Priya (tutor)").
+
+**Roles:**
+- **owner** — everything.
+- **tutor** — marks attendance, schedules makeups and reschedules; can see
+  students and classes but not change them; **no billing or payments** (the
+  Billing tab, rates, and payment data are hidden *and* refused by the
+  server).
+
+**Managing people** (works whether or not the server is running; changes
+apply on the next tap):
+```
+npm run users                          # everyone, their links, when each was last used
+npm run users -- revoke <link id>      # turn off one link (e.g. a lost phone)
+npm run users -- role "Priya" owner    # change a role
+npm run users -- disable "Priya"       # turn off all of someone's links (enable to undo)
+```
+Links are only shown once, when made — they aren't stored anywhere (only a
+fingerprint of each is). Lost one? Revoke it and make a new one.
+
+*Upgrading from the single shared link:* your old link keeps working (as an
+owner) so no phone gets locked out — `npm run serve` prints it. Once
+everyone has their own link, revoke it (`npm run users` shows its id,
+labelled "The original shared link").
 
 Leave the `npm run serve` terminal running (or the Mac awake) while the app
-is in use — same as Option B, it's served live from this computer. After
-you change the app's code, stop it (Ctrl+C) and run `npm run serve` again
-to rebuild before reopening the icon.
+is in use. After you change the app's code, stop it (Ctrl+C) and run `npm
+run serve` again to rebuild before reopening the icon.
 
 ### Option B: Expo Go (for active development)
 
@@ -169,67 +186,107 @@ while using the app.
   localStorage on web), separate per device. This only matters for active
   development; day-to-day use should go through `npm run serve`.
 
-## Beyond the home Wi-Fi (optional next step)
+## Using it away from home Wi-Fi (Tailscale, free)
 
-`npm run serve`'s shared data only works for devices on the same Wi-Fi as
-this computer (and only while the computer's awake and the server's
-running). If you want it reachable — and staying in sync — from anywhere,
-not just at home, the next step is either:
-- **Tailscale**, so the phones can reach this same server from any network, or
-- a free Firebase project (Firestore + Auth), which moves the data to the
-  cloud entirely instead of living on this computer.
+[Tailscale](https://tailscale.com) makes a private network between your
+own devices, so your phones can reach this Mac from anywhere (mobile data,
+another Wi-Fi) — and gives the app a proper `https://` address. Free for
+up to 3 people. The Mac still needs to be on and running `npm run serve`.
 
-Ask your assistant to set either of these up when you're ready.
+One-time setup (about 15 minutes):
+1. **Mac:** install Tailscale from [tailscale.com/download/mac](https://tailscale.com/download/mac)
+   (or the Mac App Store), open it, and sign in (Google is fine). Allow the
+   VPN configuration when macOS asks.
+2. **Turn on HTTPS:** in the [Tailscale admin console → DNS](https://login.tailscale.com/admin/dns),
+   make sure **MagicDNS** is on and enable **HTTPS Certificates**.
+3. **Point Tailscale at the app** (in Terminal, with `npm run serve` running):
+   ```
+   /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8899
+   ```
+   It prints the address, like `https://your-mac.tail1234.ts.net`. This
+   stays on across restarts.
+4. **Each phone:** install the Tailscale app (App Store / Play Store) and
+   sign in **with the same account** as the Mac.
+5. **New links include the Tailscale address automatically** — `npm run
+   users -- link ...` prints both a "Home Wi-Fi" and an "Anywhere
+   (Tailscale)" link. Use the Anywhere one, and add it to the home screen
+   as usual. (Existing home-screen icons point at the Wi-Fi address; make a
+   new link to switch.)
+
+Only devices signed into your Tailscale account can reach the app — it is
+not on the public internet. Moving the data to the cloud entirely (so the
+Mac doesn't have to stay on) is a later step; see DESIGN.md.
 
 ## Backing up your data off this computer
 
 Everything in `production/` (including its automatic on-disk backups) only
 exists on this Mac. If this computer is ever lost, stolen, or its disk
-fails, that's gone too. To keep a copy somewhere else:
+fails, that's gone too. Set up all three steps below once.
 
+### 1. Choose a backup passphrase
+
+```
+npm run backup:passphrase
+```
+
+Backups are encrypted (AES-256) with this passphrase, saved in your macOS
+Keychain so backups can run on their own. **Also keep it somewhere that
+isn't this Mac** — a password manager, or written down somewhere safe. If
+the Mac dies, the Keychain dies with it, and without the passphrase no
+backup can ever be opened again (by you or anyone — that's the point).
+
+Then make your first backup:
 ```
 npm run backup
 ```
+It saves an encrypted file to `~/Documents/TutoringTrackerBackups/`,
+**re-opens it to verify it can actually be restored**, and keeps the newest
+60 there.
 
-This encrypts a copy of your current data (AES-256, via `openssl` — already
-built into macOS, nothing to install) and saves it to
-`~/Documents/TutoringTrackerBackups/`. You'll be prompted for a passphrase
-(typed twice, hidden) — **write it down somewhere safe and separate from
-the backup file itself** (a password manager, not a sticky note next to
-your laptop). Without that passphrase, the backup can never be opened
-again, by you or anyone else — that's the point of encrypting it.
+### 2. Upload to Google Drive automatically (free)
 
-**Uploading it to Google Drive automatically** (one-time setup, a few
-minutes, on Google's site):
+One-time setup on Google's site (about 10 minutes):
 1. Go to [console.cloud.google.com](https://console.cloud.google.com/projectcreate) and create a new project (any name, e.g. "Tutoring Tracker Backups").
 2. With that project selected, open [this link](https://console.cloud.google.com/apis/library/drive.googleapis.com) and click **Enable** (turns on the Google Drive API for this project).
-3. Open [the OAuth consent screen page](https://console.cloud.google.com/apis/credentials/consent), choose **External**, fill in an app name + your email in the two email fields, save through the steps, and on the **Test users** step add your own Google account's email (the one that owns the Drive folder).
-4. Open [the Credentials page](https://console.cloud.google.com/apis/credentials) → **Create Credentials** → **OAuth client ID** → Application type **Desktop app** → Create.
-5. Copy the **Client ID** and **Client secret** it shows you, then run:
+3. Open [the OAuth consent screen page](https://console.cloud.google.com/apis/credentials/consent), choose **External**, fill in an app name + your email in the two email fields, and save through the steps.
+4. **Click "Publish app"** (Publishing status → In production). Skip this and Google cuts the connection off every 7 days, silently breaking automatic uploads. The only access this asks for (`drive.file`: just files this app creates) is classed as non-sensitive, so publishing needs no review — when you approve it in step 6, Google may show an "unverified app" screen: click Advanced → continue, it's your own app.
+5. Open [the Credentials page](https://console.cloud.google.com/apis/credentials) → **Create Credentials** → **OAuth client ID** → Application type **Desktop app** → Create.
+6. Copy the **Client ID** and **Client secret** it shows you, then run:
    ```
    GDRIVE_CLIENT_ID=<paste> GDRIVE_CLIENT_SECRET=<paste> npm run gdrive-auth
    ```
-   This opens your browser once for you to approve access (only to files
-   this app creates — it can never see the rest of your Drive), then saves
-   the connection to `server/gdrive-credentials.json` (gitignored — never
-   commit it, it grants upload access to your Drive).
+   This opens your browser once to approve access (only to files this app
+   creates — it can never see the rest of your Drive), then saves the
+   connection to `server/gdrive-credentials.json` (gitignored — never commit
+   it, it grants upload access to your Drive).
 
-Once connected, every `npm run backup` uploads the encrypted file straight
-into your Google Drive folder automatically — no more dragging. Until
-you've done this setup (or if the upload ever fails), it falls back to
-opening the file's Finder location and your Google Drive folder in the
-browser so you can drag it over yourself.
+From then on every backup uploads to your Drive folder by itself. Until
+it's connected, `npm run backup` opens the file's Finder location and the
+Drive folder so you can drag it over yourself.
 
-Run `npm run backup` periodically (e.g. monthly, or after a big batch of new students).
-It captures a snapshot of your students/classes/attendance/makeup/payments
-at that moment — not a live sync, so anything entered after your last
-backup wouldn't be in it if you ever had to restore.
+### 3. Back up automatically every day
 
-**To restore from a backup** (this replaces the current `production/`
-folder, after safety-copying it first):
+```
+npm run backup:schedule
+```
+
+Runs a backup every day at 9:00 PM (or as soon as the Mac wakes, if it was
+asleep) using macOS's own scheduler — nothing to install. It never asks
+anything or opens windows; you'll get a Mac notification only if a backup
+fails. Results are logged to `~/Library/Logs/tutoring-backup.log`. To check
+it works right away: `launchctl kickstart gui/$(id -u)/com.marsarsolutions.tutoring-tracker.backup`,
+then `tail ~/Library/Logs/tutoring-backup.log`. Turn it off with
+`npm run backup:unschedule`.
+
+### Restoring
+
 ```
 npm run restore -- ~/Documents/TutoringTrackerBackups/tutoring-backup-<timestamp>.tar.gz.enc
 ```
+Replaces the current `production/` folder — after moving the current one
+aside to `production-before-restore-<timestamp>/` first. It tries the
+Keychain passphrase, and asks if the backup was made with a different one.
+Stop the server first, and start it again afterward.
 
 ## Looking at your data directly (SQL)
 
@@ -296,25 +353,32 @@ src/
 
 server/           the "npm run serve" home-screen-app server (see DESIGN.md)
   __tests__/      integration tests for serve.js (npm test)
-  serve.js        static file server + token auth + /api/<resource>
+  serve.js        static file server + per-person login + roles + /api/...
+  users.js        npm run users -- people, roles, personal links
+  permissions.js  what each role (owner, tutor) may do
+  links.js        builds Wi-Fi / Tailscale link URLs
   db/             the data store, decoupled from serve.js (see DESIGN.md)
     store.js        the interface serve.js actually calls
     sqlite-store.js  the SQLite tables, per-record saves + version checks,
                      and the automatic, self-verifying upgrade
-    snapshot.js      consistent copy of the database, used by backup.sh
+    control-store.js people, roles, personal links (control.db)
+    snapshot.js      consistent copy of a database, used by backup.sh
     __tests__/       unit tests for the store, no HTTP involved
-  backup.sh       npm run backup -- encrypted off-machine backup
+  backup.sh       npm run backup -- encrypted, self-verifying backup
+  backup-passphrase.sh  npm run backup:passphrase -- saves it in Keychain
+  backup-schedule.sh    npm run backup:schedule -- daily, via launchd
   restore.sh      npm run restore -- reverses a backup.sh backup
   gdrive-auth.js  npm run gdrive-auth -- one-time Google Drive connection
   gdrive-upload.js   uploads a backup file, used by backup.sh
   gdrive-credentials.json   generated by gdrive-auth, not committed
   icons/          generated app icons (192/512/apple-touch)
-  access-token.txt   generated at runtime, not committed
+  access-token.txt   the old shared link (imported once), not committed
 
 production/       ALL real data lives here -- never touch for testing.
   tutoring.db     SQLite database -- students, classes, sessions,
                   payments tables (see DESIGN.md); tutoring.db-wal
                   holds its most recent saves -- keep the two together
+  control.db      people, roles, personal links (fingerprints only)
   backups/        automatic snapshot of the database before every save
 ```
 

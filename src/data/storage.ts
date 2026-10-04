@@ -29,8 +29,18 @@ export type ResourceName = 'students' | 'classes' | 'sessions' | 'payments';
  *   retried with the next save of the same kind of data.
  * - 'conflict': another device changed the same record first; nothing was
  *   overwritten. The caller should reload that resource (reloadResource).
+ *   lastConflictBy(resource) says who, if the server knows.
+ * - 'forbidden': this person's login isn't allowed to change this.
  */
-export type SaveOutcome = 'saved' | 'local-only' | 'failed' | 'conflict';
+export type SaveOutcome = 'saved' | 'local-only' | 'failed' | 'conflict' | 'forbidden';
+
+/** Who's signed in (from the server). null when there's no server (dev
+ * mode / Expo Go): then there are no logins and everything is allowed. */
+export interface Me {
+  name: string;
+  role: string;
+  permissions: string[];
+}
 
 interface HasId {
   id: string;
@@ -79,6 +89,14 @@ const dirty = new Map<ResourceName, Set<string>>();
 // Resources where a save hit a conflict: queued saves for them are
 // dropped (not sent with stale data) until the resource is reloaded.
 const conflicted = new Set<ResourceName>();
+// Who saved first, for the most recent conflict on each resource.
+const conflictBy = new Map<ResourceName, string>();
+
+/** The name of whoever saved first in the latest conflict on `resource`,
+ * if the server said. */
+export function lastConflictBy(resource: ResourceName): string | null {
+  return conflictBy.get(resource) ?? null;
+}
 
 // Every server write and conflict-reload goes through this one queue, in
 // order -- so a class is never saved before the new student it lists, and
@@ -146,6 +164,13 @@ async function fetchResource<T extends HasId>(resource: ResourceName): Promise<T
   if (Platform.OS !== 'web') return null;
   try {
     const res = await fetch(`/api/${resource}`, { credentials: 'same-origin', headers: apiHeaders() });
+    // Not allowed for this login (e.g. a tutor and payments): it's
+    // genuinely empty for them -- don't fall back to anything stored
+    // locally from an earlier login on this device.
+    if (res.status === 403) {
+      serverConfirmedReachable = true;
+      return [];
+    }
     if (!res.ok) return null;
     const body = await res.json();
     if (!Array.isArray(body)) return null;
@@ -159,6 +184,19 @@ async function fetchResource<T extends HasId>(resource: ResourceName): Promise<T
     conflicted.delete(resource);
     await writeLocal(resource, JSON.stringify(records));
     return records;
+  } catch {
+    return null;
+  }
+}
+
+/** Who's signed in, or null when there's no server (dev mode / native). */
+export async function loadMe(): Promise<Me | null> {
+  if (Platform.OS !== 'web') return null;
+  try {
+    const res = await fetch('/api/me', { credentials: 'same-origin', headers: apiHeaders() });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body && typeof body.name === 'string' && Array.isArray(body.permissions) ? body : null;
   } catch {
     return null;
   }
@@ -211,7 +249,7 @@ export function diffRecords<T extends HasId>(prev: T[], next: T[], alsoResend: I
   return ops;
 }
 
-type SendResult = 'ok' | 'conflict' | 'unreachable';
+type SendResult = 'ok' | 'conflict' | 'forbidden' | 'unreachable';
 
 async function send<T extends HasId>(resource: ResourceName, op: Operation<T>): Promise<SendResult> {
   const key = versionKey(resource, op.id);
@@ -223,7 +261,17 @@ async function send<T extends HasId>(resource: ResourceName, op: Operation<T>): 
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(op.kind === 'put' ? { record: op.record, baseVersion } : { baseVersion }),
     });
-    if (res.status === 409) return 'conflict';
+    if (res.status === 409) {
+      try {
+        const body = await res.json();
+        if (typeof body.updatedBy === 'string') conflictBy.set(resource, body.updatedBy);
+        else conflictBy.delete(resource);
+      } catch {
+        conflictBy.delete(resource);
+      }
+      return 'conflict';
+    }
+    if (res.status === 403) return 'forbidden';
     if (!res.ok) return 'unreachable';
     const body = await res.json(); // throws on a non-JSON reply (e.g. a dev server's HTML) -> unreachable
     serverConfirmedReachable = true;
@@ -268,6 +316,11 @@ export function saveChanges<T extends HasId>(resource: ResourceName, prev: T[], 
         conflicted.add(resource);
         return 'conflict' as const;
       }
+      if (result === 'forbidden') {
+        // Not something a retry will fix -- don't keep re-sending it.
+        for (const op of ops.slice(i)) pending.delete(op.id);
+        return 'forbidden' as const;
+      }
       if (!serverConfirmedReachable) return 'local-only' as const;
       for (const op of ops.slice(i)) pending.add(op.id);
       return 'failed' as const;
@@ -281,6 +334,7 @@ export function __resetStorageStateForTests() {
   versions.clear();
   dirty.clear();
   conflicted.clear();
+  conflictBy.clear();
   queue = Promise.resolve();
   serverConfirmedReachable = false;
 }

@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 
 import { monthKeysInRange, toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
-import { loadResource, reloadResource, ResourceName, saveChanges, SaveOutcome } from '@/data/storage';
+import { lastConflictBy, loadMe, loadResource, Me, reloadResource, ResourceName, saveChanges, SaveOutcome } from '@/data/storage';
 import {
   AppData,
   AttendanceStatus,
@@ -41,6 +41,13 @@ export interface Occurrence {
 interface AppDataContextValue {
   data: AppData;
   loading: boolean;
+  /** Who's signed in -- null with no server (dev mode / Expo Go). */
+  me: Me | null;
+  /** Whether the signed-in person may do something, e.g.
+   * can('payments:read'). Always true with no server (no logins then).
+   * Screens use it to hide what someone can't use; the server enforces it
+   * regardless. */
+  can: (permission: string) => boolean;
 
   addStudent: (input: Omit<Student, 'id' | 'createdAt'>) => Student;
   updateStudent: (id: string, patch: Partial<Omit<Student, 'id'>>) => void;
@@ -157,6 +164,7 @@ const RESOURCE_FOR: Record<keyof AppData, ResourceName> = {
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(emptyAppData);
   const [loading, setLoading] = useState(true);
+  const [me, setMe] = useState<Me | null>(null);
 
   // React batches state updates within one synchronous tick, so two calls
   // to (say) addStudent back-to-back without an intervening render would
@@ -178,15 +186,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       // Four independent resources -- see server/db/ and DESIGN.md. A
       // problem loading one never takes the others down with it (each
       // falls back to an empty list on its own).
-      const [students, groups, sessions, payments] = await Promise.all([
+      const [students, groups, sessions, payments, signedIn] = await Promise.all([
         loadResource<Student>('students'),
         loadResource<ClassGroup>('classes'),
         loadResource<SessionRecord>('sessions'),
         loadResource<Payment>('payments'),
+        loadMe(),
       ]);
       const loaded: AppData = { students, groups, sessions, payments };
       dataRef.current = loaded;
       setData(loaded);
+      setMe(signedIn);
       setLoading(false);
     })();
   }, []);
@@ -211,11 +221,22 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       );
       return;
     }
+    if (outcome === 'forbidden') {
+      alert("Not allowed", "Your login doesn't allow this change, so it wasn't saved. The owner can change what your login can do.");
+      reloading.current.add(key);
+      reloadResource(RESOURCE_FOR[key]).then((fresh) => {
+        reloading.current.delete(key);
+        dataRef.current = { ...dataRef.current, [key]: fresh };
+        setData(dataRef.current);
+      });
+      return;
+    }
     if (outcome !== 'conflict' || reloading.current.has(key)) return;
     reloading.current.add(key);
+    const who = lastConflictBy(RESOURCE_FOR[key]);
     alert(
-      'Changed on another device',
-      "Someone saved a newer version of this from another device, so your last change here wasn't applied — nothing was overwritten. The latest version has been loaded; please check it and redo your change if it's still needed.",
+      who ? `Changed by ${who}` : 'Changed on another device',
+      `${who ?? 'Someone'} saved a newer version of this${who ? '' : ' from another device'}, so your last change here wasn't applied — nothing was overwritten. The latest version has been loaded; please check it and redo your change if it's still needed.`,
     );
     reloadResource(RESOURCE_FOR[key]).then((fresh) => {
       reloading.current.delete(key);
@@ -678,10 +699,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     [persistPayments, resolveRangePayments],
   );
 
+  const can = useCallback((permission: string) => !me || me.permissions.includes(permission), [me]);
+
   const value = useMemo<AppDataContextValue>(
     () => ({
       data,
       loading,
+      me,
+      can,
       addStudent,
       updateStudent,
       addGroup,
@@ -701,6 +726,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     [
       data,
       loading,
+      me,
+      can,
       addStudent,
       updateStudent,
       addGroup,

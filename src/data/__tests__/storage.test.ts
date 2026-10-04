@@ -17,6 +17,8 @@ jest.mock('@react-native-async-storage/async-storage', () =>
 import {
   __resetStorageStateForTests,
   diffRecords,
+  lastConflictBy,
+  loadMe,
   loadResource,
   reloadResource,
   saveChanges,
@@ -30,6 +32,7 @@ let serverRows: Map<string, { record: Rec; version: number }>;
 let requests: { method: string; url: string; body?: { baseVersion?: number | null } }[];
 let networkDown: boolean;
 let noServer: boolean;
+let forbidden: boolean; // the signed-in login isn't allowed this resource
 
 function reply(status: number, body: unknown) {
   return Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -41,6 +44,8 @@ function fakeFetch(url: string, init: { method?: string; body?: string } = {}) {
   requests.push({ method, url, body });
   if (networkDown) return Promise.reject(new Error('network down'));
   if (noServer) return reply(404, 'not found');
+  if (url === '/api/me') return reply(200, { name: 'Priya', role: 'tutor', permissions: ['sessions:read'] });
+  if (forbidden) return reply(403, { ok: false, error: "Your login doesn't allow this." });
 
   if (method === 'GET') {
     return reply(200, [...serverRows.values()].map(({ record, version }) => ({ ...record, _version: version })));
@@ -48,7 +53,7 @@ function fakeFetch(url: string, init: { method?: string; body?: string } = {}) {
   const id = decodeURIComponent(url.split('/').pop()!);
   const row = serverRows.get(id);
   const current = row ? row.version : null;
-  if (body.baseVersion !== current) return reply(409, { ok: false, conflict: true, version: current });
+  if (body.baseVersion !== current) return reply(409, { ok: false, conflict: true, version: current, updatedBy: 'Priya' });
   if (method === 'DELETE') {
     serverRows.delete(id);
     return reply(200, { ok: true, version: null });
@@ -74,6 +79,7 @@ beforeEach(() => {
   requests = [];
   networkDown = false;
   noServer = false;
+  forbidden = false;
   local = {};
   Platform.OS = 'web';
   (globalThis as { window?: unknown }).window = {
@@ -209,6 +215,36 @@ describe('saveChanges', () => {
     expect(await saveChanges('students', [], [{ id: 'a', name: 'A' }])).toBe('local-only');
     expect(JSON.parse(local.students)).toEqual([{ id: 'a', name: 'A' }]);
     expect(await loadResource<Rec>('students')).toEqual([{ id: 'a', name: 'A' }]);
+  });
+
+  it('reports who saved first in a conflict', async () => {
+    serverRows.set('a', { record: { id: 'a', name: 'A' }, version: 1 });
+    const loaded = await loadResource<Rec>('students');
+    otherDeviceSaves({ id: 'a', name: 'A2' });
+    expect(await saveChanges('students', loaded, [{ id: 'a', name: 'mine' }])).toBe('conflict');
+    expect(lastConflictBy('students')).toBe('Priya');
+  });
+
+  it("returns an empty list -- not an older local copy -- for a resource this login can't read", async () => {
+    local.payments = JSON.stringify([{ id: 'old', name: 'saved here by an earlier owner login' }]);
+    forbidden = true;
+    expect(await loadResource<Rec>('payments')).toEqual([]);
+  });
+
+  it("reports a save this login isn't allowed to make, and doesn't keep retrying it", async () => {
+    await loadResource<Rec>('students'); // server reached
+    forbidden = true;
+    expect(await saveChanges('students', [], [{ id: 'a', name: 'A' }])).toBe('forbidden');
+    forbidden = false;
+    const before = writes().length;
+    expect(await saveChanges('students', [{ id: 'a', name: 'A' }], [{ id: 'a', name: 'A' }])).toBe('saved');
+    expect(writes().length).toBe(before); // nothing re-sent
+  });
+
+  it('reads who is signed in, or null with no server', async () => {
+    expect(await loadMe()).toEqual({ name: 'Priya', role: 'tutor', permissions: ['sessions:read'] });
+    noServer = true;
+    expect(await loadMe()).toBeNull();
   });
 
   it('reads sessions saved on this device before they were one list', async () => {

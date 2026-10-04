@@ -4,6 +4,7 @@ import { ScrollView, StyleSheet, View, ViewProps } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { COPYRIGHT_NOTICE } from '@/constants/brand';
 import { MaxContentWidth } from '@/constants/theme';
+import { useAppData } from '@/data/store';
 import { useTheme } from '@/hooks/use-theme';
 
 interface ScreenProps extends ViewProps {
@@ -21,6 +22,7 @@ interface ScreenProps extends ViewProps {
  * FlatList's virtualization isn't needed). */
 export function Screen({ children, style, copyright = false, ...rest }: ScreenProps) {
   const theme = useTheme();
+  const { me } = useAppData();
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]} edges={['top']}>
@@ -30,6 +32,7 @@ export function Screen({ children, style, copyright = false, ...rest }: ScreenPr
         </View>
         {copyright && (
           <ThemedText type="small" themeColor="textSecondary" style={styles.copyright}>
+            {me ? `Signed in as ${me.name} (${me.role})\n` : ''}
             {COPYRIGHT_NOTICE}
           </ThemedText>
         )}

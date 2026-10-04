@@ -146,9 +146,78 @@ to re-run when React re-renders, which reading a ref wouldn't trigger.
 
 Every request to `server/serve.js` (other than `manifest.json` and the app
 icons, which have to stay public so the OS can fetch them while installing)
-requires a token, generated once and saved to `server/access-token.txt`.
-This exists so that anything else on the Wi-Fi network can't read your
-students' info or billing just by guessing the server's address.
+requires a **personal access token** — one per person per device. This
+exists so that anything else on the network can't read your students' info
+or billing just by guessing the server's address, and so each device can be
+cut off on its own.
+
+### People, roles, and personal links
+
+`server/db/control-store.js` keeps `production/control.db` — separate from
+`tutoring.db` on purpose (the business data), so that when there's more
+than one tutoring business (the multi-tenant plan) the login side doesn't
+have to move:
+
+- `users` — name (unique, case-insensitive), role (`owner` | `tutor`),
+  optional `disabled_at`.
+- `access_tokens` — one row per link: the person, a label ("Priya's
+  iPhone"), created / last-used / revoked dates, and **only a SHA-256 hash
+  of the token**. The plain token exists once, in the link printed by
+  `npm run users -- link`; it isn't stored anywhere, so reading control.db
+  (or a backup of it) can't recover anyone's link. Tokens are 256-bit
+  random (`crypto.randomBytes(32)`).
+
+On each request `serve.js` takes every token the request offers (`?token=`,
+the `X-Dashboard-Token` header, the `dash_token` cookie), and the first one
+that hashes to an active link of a non-disabled person identifies the user.
+A revoked link or a disabled person stops working on the very next request
+— there's no cache. Wrong tokens are counted per client address; past 20
+in 15 minutes that address gets 429s for the rest of the window (tokens
+can't be guessed anyway; this just keeps noise down).
+
+**Roles map to permissions** (`server/permissions.js`), named
+`<resource>:<read|write>` — the same shape as OAuth scopes, so a later
+move to a real sign-in provider can carry them unchanged:
+
+| | students | classes | sessions | payments |
+|---|---|---|---|---|
+| **owner** | read, write | read, write | read, write | read, write |
+| **tutor** | read | read | read, write | — |
+
+`serve.js` checks the permission on every `GET /api/<resource>` and every
+`PUT`/`DELETE` (403 otherwise). `GET /api/me` returns the signed-in name,
+role and permissions; the app (`useAppData().can(...)`) uses it to hide what
+someone can't use — the Billing tab (`href: null` on that tab), rates, Add /
+Edit / Mark Active buttons, and class editing ("View only") — and shows
+"Signed in as …" in the tab footer. Hiding is only a convenience; the
+server check is the real one. With no server at all (dev mode / Expo Go)
+there are no logins, and `can()` allows everything.
+
+**Who changed what.** Every saved record gets `updated_by` (the user id)
+and `updated_at` — schema v3, additive columns on students, classes,
+sessions, payments. When a save is refused as a conflict, the 409 carries
+`updatedBy` (resolved to the person's name by `serve.js`), so the app says
+"Changed by Priya" instead of "another device". A save someone's role
+doesn't allow comes back 403: the app says "Not allowed", reloads that
+resource from the server, and doesn't retry it. A 403 on *reading* a
+resource (a tutor's payments) is treated as genuinely empty — never as
+"server unreachable", which would fall back to an older local copy.
+
+**Upgrading from the single shared token.** The first time the server
+starts with no people in control.db, it imports `server/access-token.txt`
+as an **owner** named "Shared link (from before separate logins)", labelled
+"The original shared link — revoke once everyone has their own", so no
+phone is locked out. On a brand-new install (no old token) it creates an
+"Owner" and prints that link once. Each person's home-screen manifest
+embeds *their own* token in `start_url`.
+
+`npm run users` (`server/users.js`) manages all of this from the terminal —
+`add`, `link`, `revoke`, `role`, `disable`/`enable`, and a listing with
+last-used dates. Links print a "Home Wi-Fi" URL and, when Tailscale is
+running and serving the app (`server/links.js` checks `tailscale serve
+status`), an "Anywhere (Tailscale)" HTTPS URL.
+
+### How the token reaches the server
 
 The tricky part: an "Add to Home Screen" app on iOS runs in its **own,
 isolated storage container**, separate from Safari itself — cookies and
@@ -408,6 +477,30 @@ encrypts it with `openssl enc -aes-256-cbc -pbkdf2` using a passphrase
 typed interactively (never stored anywhere — openssl's own prompt, hidden
 input, typed twice), and writes the result to
 `~/Documents/TutoringTrackerBackups/`.
+
+**Unattended, verified, daily.** `npm run backup:passphrase` stores the
+passphrase in the macOS login Keychain (service `tutoring-tracker-backup`);
+when it's there, `backup.sh` encrypts with it non-interactively (`openssl
+-pass env:`, never on disk or on a command line) and then **decrypts the
+new file again and checks the archive contains `tutoring.db`** — a backup
+that doesn't round-trip is deleted and reported, rather than kept and
+trusted. Every `*.db` in production/ (tutoring.db and control.db) goes in as
+a `snapshot.js` copy. The newest 60 local files are kept (Drive keeps all).
+`npm run backup:schedule` installs a launchd LaunchAgent
+(`com.marsarsolutions.tutoring-tracker.backup`) running `backup.sh
+--scheduled` daily at 21:00 — launchd also runs a missed time on wake. It's
+given the absolute path of the node it was set up with (launchd doesn't
+load nvm). `--scheduled` never prompts or opens windows: failures (no
+passphrase saved, encryption, verification, Drive upload) post a macOS
+notification and go to `~/Library/Logs/tutoring-backup.log`. Tested: a
+launchd job can write to `~/Documents` on this Mac (it's a protected
+folder, so this was checked rather than assumed). `restore.sh` tries the
+Keychain passphrase first, then asks.
+
+Google detail that matters for unattended uploads: an OAuth app left in
+**Testing** status gets refresh tokens that expire after 7 days, which
+would silently break the daily upload — so the README's setup has you
+**publish** it (`drive.file` is a non-sensitive scope, so no review).
 
 Getting it into Google Drive is a real API upload, not just a synced
 folder: `server/gdrive-auth.js` (`npm run gdrive-auth`, one-time) runs a

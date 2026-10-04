@@ -17,6 +17,8 @@
  *   v2 -- session_students.extra_minutes: extra time a student stayed
  *         beyond a session's scheduled length (SessionRecord.extraMinutes),
  *         billed along with it.
+ *   v3 -- updated_by / updated_at on students, classes, sessions, payments:
+ *         who (a control.db user id) last saved each record, and when.
  *
  * Moving v0 -> latest happens automatically the first time this opens an
  * old database (see migrateFromLegacy); a v1 database just gets the newer
@@ -33,7 +35,7 @@ const { DatabaseSync, backup } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest per-save snapshots get pruned
 const PRE_MIGRATION_PREFIX = 'pre-migration-'; // never pruned
 
@@ -154,6 +156,9 @@ const SCHEMA_V1 = `
 const SCHEMA_UPGRADES = {
   2: `ALTER TABLE session_students ADD COLUMN extra_minutes INTEGER
         CHECK (extra_minutes IS NULL OR extra_minutes > 0)`,
+  3: ['students', 'classes', 'sessions', 'payments']
+    .map((t) => `ALTER TABLE ${t} ADD COLUMN updated_by TEXT; ALTER TABLE ${t} ADD COLUMN updated_at TEXT;`)
+    .join('\n'),
 };
 
 /** A problem with the data a client sent (bad shape, or a link to a
@@ -655,7 +660,11 @@ function createSqliteStore(dataDir) {
     }
   }
 
-  const currentRow = (resource, id) => db.prepare(`SELECT version, seq FROM ${resource} WHERE id = ?`).get(id);
+  const currentRow = (resource, id) =>
+    db.prepare(`SELECT version, seq, updated_by AS updatedBy FROM ${resource} WHERE id = ?`).get(id);
+
+  const stampWriter = (resource, id, actor) =>
+    db.prepare(`UPDATE ${resource} SET updated_by = ?, updated_at = ? WHERE id = ?`).run(actor ?? null, new Date().toISOString(), id);
 
   /**
    * Saves one record, but only if the caller is working from the latest
@@ -663,10 +672,11 @@ function createSqliteStore(dataDir) {
    * getResource or a previous putRecord), or null if it believes the
    * record doesn't exist yet. If someone else saved it in the meantime
    * (or created/deleted it), nothing is written and the latest copy comes
-   * back as `current`, so two devices can never silently overwrite each
-   * other's changes.
+   * back as `current` (with `updatedBy`, who saved it), so two devices can
+   * never silently overwrite each other's changes. `actor` is the
+   * control.db user id doing the save, recorded on the row.
    */
-  async function putRecord(resource, id, record, baseVersion) {
+  async function putRecord(resource, id, record, baseVersion, { actor } = {}) {
     assertResource(resource);
     validate(resource, record);
     if (record.id !== id) throw new ValidationError('Record id does not match the URL');
@@ -678,24 +688,37 @@ function createSqliteStore(dataDir) {
       const row = currentRow(resource, id);
       const expected = row ? row.version : null;
       if (baseVersion !== expected) {
-        return { ok: false, conflict: true, version: expected, current: row ? readOne(resource, id).record : null };
+        return {
+          ok: false,
+          conflict: true,
+          version: expected,
+          current: row ? readOne(resource, id).record : null,
+          updatedBy: row ? row.updatedBy : null,
+        };
       }
       const version = row ? row.version + 1 : 1;
       writers[resource](clean, version, row ? row.seq : nextSeq(resource));
+      stampWriter(resource, id, actor);
       return { ok: true, version };
     });
   }
 
   /** Deletes one record, with the same version check as putRecord.
    * Deleting something that's already gone is treated as success. */
-  async function deleteRecord(resource, id, baseVersion) {
+  async function deleteRecord(resource, id, baseVersion, { actor: _actor } = {}) {
     assertResource(resource);
     await backupSnapshot();
     return transaction(() => {
       const row = currentRow(resource, id);
       if (!row) return { ok: true, version: null };
       if (baseVersion !== row.version) {
-        return { ok: false, conflict: true, version: row.version, current: readOne(resource, id).record };
+        return {
+          ok: false,
+          conflict: true,
+          version: row.version,
+          current: readOne(resource, id).record,
+          updatedBy: row.updatedBy,
+        };
       }
       db.prepare(`DELETE FROM ${resource} WHERE id = ?`).run(id);
       return { ok: true, version: null };

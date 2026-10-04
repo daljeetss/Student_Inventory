@@ -50,7 +50,7 @@ function ClassCard({ item, students }: { item: ClassGroup; students: Student[] }
 }
 
 export default function ClassesScreen() {
-  const { data, loading } = useAppData();
+  const { data, loading, can } = useAppData();
   const { days, noScheduleYet, inactive } = groupClassesBySchedule(data.groups);
 
   const studentsFor = (item: ClassGroup) =>
@@ -62,7 +62,7 @@ export default function ClassesScreen() {
         <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
           Classes
         </ThemedText>
-        <Button title="+ Add" onPress={() => router.push('/group/new')} />
+        {can('classes:write') && <Button title="+ Add" onPress={() => router.push('/group/new')} />}
       </View>
 
       {!loading && data.groups.length === 0 && (
