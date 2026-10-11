@@ -19,6 +19,11 @@
  *         billed along with it.
  *   v3 -- updated_by / updated_at on students, classes, sessions, payments:
  *         who (a control.db user id) last saved each record, and when.
+ *   v4 -- bank reconciliation: bank_transactions (+ bank_allocations: how
+ *         a deposit was split across students/months), sender_rules (+
+ *         sender_rule_students: "this Zelle sender pays for these
+ *         students" or "not tutoring"), settings (key -> JSON value), and
+ *         payments.method (zelle | cash | check | other).
  *
  * Moving v0 -> latest happens automatically the first time this opens an
  * old database (see migrateFromLegacy); a v1 database just gets the newer
@@ -35,11 +40,24 @@ const { DatabaseSync, backup } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest per-save snapshots get pruned
 const PRE_MIGRATION_PREFIX = 'pre-migration-'; // never pruned
 
-const RESOURCES = ['students', 'classes', 'sessions', 'payments'];
+// The original four -- the only ones the pre-v1 formats ever had.
+const CORE_RESOURCES = ['students', 'classes', 'sessions', 'payments'];
+const RESOURCES = [...CORE_RESOURCES, 'bankTransactions', 'senderRules', 'settings'];
+// Resource name (as in the API: /api/bankTransactions) -> table name.
+const TABLE = {
+  students: 'students',
+  classes: 'classes',
+  sessions: 'sessions',
+  payments: 'payments',
+  bankTransactions: 'bank_transactions',
+  senderRules: 'sender_rules',
+  settings: 'settings',
+};
+const PAYMENT_METHODS = ['zelle', 'cash', 'check', 'other'];
 
 // Every field each resource's client-side type (src/data/types.ts) has.
 // Anything else a record happens to carry goes into that row's `extra`
@@ -52,7 +70,15 @@ const KNOWN_FIELDS = {
     'id', 'date', 'startTime', 'durationMinutes', 'groupId', 'isMakeup', 'makeupForRecordId',
     'studentIds', 'rosterCustomized', 'attendance', 'extraMinutes', 'notes', 'createdAt',
   ],
-  payments: ['id', 'studentId', 'month', 'amountDue', 'amountPaid', 'status', 'datePaid', 'messageSentAt', 'createdAt'],
+  payments: [
+    'id', 'studentId', 'month', 'amountDue', 'amountPaid', 'status', 'method', 'datePaid', 'messageSentAt', 'createdAt',
+  ],
+  bankTransactions: [
+    'id', 'date', 'amount', 'description', 'sender', 'memo', 'reference', 'status', 'allocations', 'note',
+    'importedAt', 'resolvedAt', 'createdAt',
+  ],
+  senderRules: ['id', 'sender', 'studentIds', 'ignore', 'createdAt'],
+  settings: ['id', 'value', 'createdAt'],
 };
 
 const SCHEMA_V1 = `
@@ -159,6 +185,73 @@ const SCHEMA_UPGRADES = {
   3: ['students', 'classes', 'sessions', 'payments']
     .map((t) => `ALTER TABLE ${t} ADD COLUMN updated_by TEXT; ALTER TABLE ${t} ADD COLUMN updated_at TEXT;`)
     .join('\n'),
+  4: `
+    ALTER TABLE payments ADD COLUMN method TEXT
+      CHECK (method IS NULL OR method IN ('zelle', 'cash', 'check', 'other'));
+
+    -- One row per imported bank deposit (only money coming in is kept).
+    CREATE TABLE bank_transactions (
+      id          TEXT PRIMARY KEY,
+      date        TEXT NOT NULL,
+      amount      REAL NOT NULL,
+      description TEXT NOT NULL,
+      sender      TEXT,
+      memo        TEXT,
+      reference   TEXT,
+      status      TEXT NOT NULL CHECK (status IN ('new', 'matched', 'ignored')),
+      note        TEXT,
+      imported_at TEXT NOT NULL,
+      resolved_at TEXT,
+      created_at  TEXT NOT NULL,
+      extra       TEXT,
+      version     INTEGER NOT NULL,
+      seq         INTEGER NOT NULL,
+      updated_by  TEXT,
+      updated_at  TEXT
+    );
+    CREATE INDEX bank_transactions_by_date ON bank_transactions(date);
+
+    -- How a matched deposit was split: which student, which month, how much.
+    CREATE TABLE bank_allocations (
+      transaction_id TEXT NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+      position       INTEGER NOT NULL,
+      student_id     TEXT NOT NULL REFERENCES students(id),
+      month          TEXT NOT NULL,
+      amount         REAL NOT NULL,
+      PRIMARY KEY (transaction_id, position)
+    );
+
+    -- Remembered senders: "Zelle from X pays for these students", or
+    -- "Zelle from X is not tutoring money".
+    CREATE TABLE sender_rules (
+      id         TEXT PRIMARY KEY,
+      sender     TEXT NOT NULL,
+      is_ignored INTEGER NOT NULL CHECK (is_ignored IN (0, 1)),
+      created_at TEXT NOT NULL,
+      extra      TEXT,
+      version    INTEGER NOT NULL,
+      seq        INTEGER NOT NULL,
+      updated_by TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE sender_rule_students (
+      rule_id    TEXT NOT NULL REFERENCES sender_rules(id) ON DELETE CASCADE,
+      position   INTEGER NOT NULL,
+      student_id TEXT NOT NULL REFERENCES students(id),
+      PRIMARY KEY (rule_id, position)
+    );
+
+    -- App-wide settings, one JSON value per key (e.g. when reconciling starts).
+    CREATE TABLE settings (
+      id         TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      version    INTEGER NOT NULL,
+      seq        INTEGER NOT NULL,
+      updated_by TEXT,
+      updated_at TEXT
+    );
+  `,
 };
 
 /** A problem with the data a client sent (bad shape, or a link to a
@@ -231,6 +324,33 @@ function validate(resource, record) {
     check(record, 'status', 'string');
     check(record, 'datePaid', 'string', { optional: true });
     check(record, 'messageSentAt', 'string', { optional: true });
+    check(record, 'method', 'string', { optional: true });
+    if (record.method !== undefined && !PAYMENT_METHODS.includes(record.method)) {
+      throw new ValidationError(`method must be one of: ${PAYMENT_METHODS.join(', ')}`);
+    }
+  } else if (resource === 'bankTransactions') {
+    check(record, 'date', 'string');
+    check(record, 'amount', 'number');
+    check(record, 'description', 'string');
+    check(record, 'status', 'string');
+    check(record, 'importedAt', 'string');
+    for (const f of ['sender', 'memo', 'reference', 'note', 'resolvedAt']) check(record, f, 'string', { optional: true });
+    check(record, 'allocations', 'array');
+    for (const a of record.allocations) {
+      if (!a || typeof a !== 'object') throw new ValidationError('allocations must be objects');
+      check(a, 'studentId', 'string');
+      check(a, 'month', 'string');
+      check(a, 'amount', 'number');
+      const unknown = Object.keys(a).filter((k) => !['studentId', 'month', 'amount'].includes(k));
+      if (unknown.length > 0) throw new ValidationError(`Unknown allocation field(s): ${unknown.join(', ')}`);
+    }
+  } else if (resource === 'senderRules') {
+    check(record, 'sender', 'string');
+    check(record, 'ignore', 'boolean');
+    check(record, 'studentIds', 'array');
+    for (const id of record.studentIds) if (typeof id !== 'string') throw new ValidationError('studentIds must be strings');
+  } else if (resource === 'settings') {
+    if (record.value === undefined) throw new ValidationError('value is required');
   }
 }
 
@@ -329,15 +449,51 @@ function createSqliteStore(dataDir) {
 
     payments(p, version, seq) {
       db.prepare(
-        `INSERT INTO payments (id, student_id, month, amount_due, amount_paid, status, date_paid, message_sent_at,
+        `INSERT INTO payments (id, student_id, month, amount_due, amount_paid, status, method, date_paid, message_sent_at,
            created_at, extra, version, seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET student_id = excluded.student_id, month = excluded.month,
            amount_due = excluded.amount_due, amount_paid = excluded.amount_paid, status = excluded.status,
-           date_paid = excluded.date_paid, message_sent_at = excluded.message_sent_at, created_at = excluded.created_at,
-           extra = excluded.extra, version = excluded.version`,
-      ).run(p.id, p.studentId, p.month, p.amountDue, p.amountPaid, p.status, orNull(p.datePaid), orNull(p.messageSentAt),
-        p.createdAt, extraOf('payments', p), version, seq);
+           method = excluded.method, date_paid = excluded.date_paid, message_sent_at = excluded.message_sent_at,
+           created_at = excluded.created_at, extra = excluded.extra, version = excluded.version`,
+      ).run(p.id, p.studentId, p.month, p.amountDue, p.amountPaid, p.status, orNull(p.method), orNull(p.datePaid),
+        orNull(p.messageSentAt), p.createdAt, extraOf('payments', p), version, seq);
+    },
+
+    bankTransactions(t, version, seq) {
+      db.prepare(
+        `INSERT INTO bank_transactions (id, date, amount, description, sender, memo, reference, status, note,
+           imported_at, resolved_at, created_at, extra, version, seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET date = excluded.date, amount = excluded.amount, description = excluded.description,
+           sender = excluded.sender, memo = excluded.memo, reference = excluded.reference, status = excluded.status,
+           note = excluded.note, imported_at = excluded.imported_at, resolved_at = excluded.resolved_at,
+           created_at = excluded.created_at, extra = excluded.extra, version = excluded.version`,
+      ).run(t.id, t.date, t.amount, t.description, orNull(t.sender), orNull(t.memo), orNull(t.reference), t.status,
+        orNull(t.note), t.importedAt, orNull(t.resolvedAt), t.createdAt, extraOf('bankTransactions', t), version, seq);
+      db.prepare('DELETE FROM bank_allocations WHERE transaction_id = ?').run(t.id);
+      const add = db.prepare(
+        'INSERT INTO bank_allocations (transaction_id, position, student_id, month, amount) VALUES (?, ?, ?, ?, ?)',
+      );
+      t.allocations.forEach((a, i) => add.run(t.id, i, a.studentId, a.month, a.amount));
+    },
+
+    senderRules(r, version, seq) {
+      db.prepare(
+        `INSERT INTO sender_rules (id, sender, is_ignored, created_at, extra, version, seq) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET sender = excluded.sender, is_ignored = excluded.is_ignored,
+           created_at = excluded.created_at, extra = excluded.extra, version = excluded.version`,
+      ).run(r.id, r.sender, bool(r.ignore), r.createdAt, extraOf('senderRules', r), version, seq);
+      db.prepare('DELETE FROM sender_rule_students WHERE rule_id = ?').run(r.id);
+      const add = db.prepare('INSERT INTO sender_rule_students (rule_id, position, student_id) VALUES (?, ?, ?)');
+      r.studentIds.forEach((sid, i) => add.run(r.id, i, sid));
+    },
+
+    settings(st, version, seq) {
+      db.prepare(
+        `INSERT INTO settings (id, value, created_at, version, seq) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET value = excluded.value, created_at = excluded.created_at, version = excluded.version`,
+      ).run(st.id, JSON.stringify(st.value), st.createdAt, version, seq);
     },
   };
 
@@ -438,12 +594,62 @@ function createSqliteStore(dataDir) {
             amountDue: r.amount_due,
             amountPaid: r.amount_paid,
             status: r.status,
+            ...(r.method != null ? { method: r.method } : {}),
             ...(r.date_paid !== null ? { datePaid: r.date_paid } : {}),
             ...(r.message_sent_at !== null ? { messageSentAt: r.message_sent_at } : {}),
             createdAt: r.created_at,
           },
           r.extra,
         ),
+        version: r.version,
+      }));
+    },
+
+    bankTransactions(where = '', args = []) {
+      const allocations = db.prepare('SELECT * FROM bank_allocations WHERE transaction_id = ? ORDER BY position');
+      return db.prepare(`SELECT * FROM bank_transactions ${where} ORDER BY seq`).all(...args).map((r) => ({
+        record: withExtra(
+          {
+            id: r.id,
+            date: r.date,
+            amount: r.amount,
+            description: r.description,
+            ...(r.sender !== null ? { sender: r.sender } : {}),
+            ...(r.memo !== null ? { memo: r.memo } : {}),
+            ...(r.reference !== null ? { reference: r.reference } : {}),
+            status: r.status,
+            allocations: allocations.all(r.id).map((a) => ({ studentId: a.student_id, month: a.month, amount: a.amount })),
+            ...(r.note !== null ? { note: r.note } : {}),
+            importedAt: r.imported_at,
+            ...(r.resolved_at !== null ? { resolvedAt: r.resolved_at } : {}),
+            createdAt: r.created_at,
+          },
+          r.extra,
+        ),
+        version: r.version,
+      }));
+    },
+
+    senderRules(where = '', args = []) {
+      const students = db.prepare('SELECT student_id FROM sender_rule_students WHERE rule_id = ? ORDER BY position');
+      return db.prepare(`SELECT * FROM sender_rules ${where} ORDER BY seq`).all(...args).map((r) => ({
+        record: withExtra(
+          {
+            id: r.id,
+            sender: r.sender,
+            studentIds: students.all(r.id).map((s) => s.student_id),
+            ignore: r.is_ignored === 1,
+            createdAt: r.created_at,
+          },
+          r.extra,
+        ),
+        version: r.version,
+      }));
+    },
+
+    settings(where = '', args = []) {
+      return db.prepare(`SELECT * FROM settings ${where} ORDER BY seq`).all(...args).map((r) => ({
+        record: { id: r.id, value: JSON.parse(r.value), createdAt: r.created_at },
         version: r.version,
       }));
     },
@@ -463,7 +669,7 @@ function createSqliteStore(dataDir) {
   }
 
   const hasAnyData = () =>
-    RESOURCES.some((t) => tableExists(t) && db.prepare(`SELECT 1 FROM ${t} LIMIT 1`).get());
+    RESOURCES.some((r) => tableExists(TABLE[r]) && db.prepare(`SELECT 1 FROM ${TABLE[r]} LIMIT 1`).get());
 
   // Snapshot the whole database before every write -- the same safety net
   // as ever (real user data was lost once, from testing directly against
@@ -543,7 +749,7 @@ function createSqliteStore(dataDir) {
    * tables, then verify every record before committing. */
   function migrateFromLegacy() {
     const source = readLegacySource();
-    const total = RESOURCES.reduce((n, r) => n + source[r].length, 0);
+    const total = CORE_RESOURCES.reduce((n, r) => n + source[r].length, 0);
 
     if (!isNewDatabase) preUpgradeSnapshot();
 
@@ -552,7 +758,7 @@ function createSqliteStore(dataDir) {
       db.exec('PRAGMA defer_foreign_keys = ON'); // insert order doesn't matter; links are checked at COMMIT
       db.exec(SCHEMA_V1);
       applySchemaUpgrades(1);
-      for (const resource of RESOURCES) {
+      for (const resource of CORE_RESOURCES) {
         source[resource].forEach((record, i) => {
           validate(resource, record);
           writers[resource](record, 1, i);
@@ -562,7 +768,7 @@ function createSqliteStore(dataDir) {
       // Read every record back and compare it to the original. Anything
       // other than a perfect match means something would be lost -- so
       // stop and leave the database exactly as it was.
-      for (const resource of RESOURCES) {
+      for (const resource of CORE_RESOURCES) {
         const migrated = new Map(readers[resource]().map(({ record }) => [record.id, canonical(record)]));
         if (migrated.size !== source[resource].length) {
           throw new Error(`${resource}: expected ${source[resource].length} records after upgrade, found ${migrated.size}`);
@@ -661,10 +867,10 @@ function createSqliteStore(dataDir) {
   }
 
   const currentRow = (resource, id) =>
-    db.prepare(`SELECT version, seq, updated_by AS updatedBy FROM ${resource} WHERE id = ?`).get(id);
+    db.prepare(`SELECT version, seq, updated_by AS updatedBy FROM ${TABLE[resource]} WHERE id = ?`).get(id);
 
   const stampWriter = (resource, id, actor) =>
-    db.prepare(`UPDATE ${resource} SET updated_by = ?, updated_at = ? WHERE id = ?`).run(actor ?? null, new Date().toISOString(), id);
+    db.prepare(`UPDATE ${TABLE[resource]} SET updated_by = ?, updated_at = ? WHERE id = ?`).run(actor ?? null, new Date().toISOString(), id);
 
   /**
    * Saves one record, but only if the caller is working from the latest
@@ -697,7 +903,7 @@ function createSqliteStore(dataDir) {
         };
       }
       const version = row ? row.version + 1 : 1;
-      writers[resource](clean, version, row ? row.seq : nextSeq(resource));
+      writers[resource](clean, version, row ? row.seq : nextSeq(TABLE[resource]));
       stampWriter(resource, id, actor);
       return { ok: true, version };
     });
@@ -720,7 +926,7 @@ function createSqliteStore(dataDir) {
           updatedBy: row.updatedBy,
         };
       }
-      db.prepare(`DELETE FROM ${resource} WHERE id = ?`).run(id);
+      db.prepare(`DELETE FROM ${TABLE[resource]} WHERE id = ?`).run(id);
       return { ok: true, version: null };
     });
   }

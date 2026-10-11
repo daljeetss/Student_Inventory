@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, View } from 'react-native';
 
@@ -12,6 +13,7 @@ import { WhatsAppSendButton } from '@/components/whatsapp-send-button';
 import { addMonths, formatHours, formatTime, monthRangeLabel, toMonthKey } from '@/data/date';
 import { groupStudentsBySchedule } from '@/data/schedule-grouping';
 import { BillingStatus, RangeBillingRow, useAppData } from '@/data/store';
+import { PaymentMethod } from '@/data/types';
 import { alert } from '@/utils/alert';
 import { buildDueMessageForRange } from '@/data/whatsapp';
 
@@ -21,6 +23,8 @@ const STATUS_TONE: Record<BillingStatus, 'primary' | 'warning' | 'danger' | 'tex
   unpaid: 'danger',
   'nothing-due': 'textSecondary',
 };
+
+const METHOD_LABEL: Record<PaymentMethod, string> = { zelle: 'Zelle', cash: 'Cash', check: 'Check', other: 'Other' };
 
 const STATUS_LABEL: Record<BillingStatus, string> = {
   paid: 'Paid',
@@ -45,12 +49,12 @@ interface BillingRowCardProps {
   toMonthKey: string;
   partialFor: string | null;
   partialAmount: string;
-  onMarkPaidInFull: (row: RangeBillingRow) => void;
+  onMarkPaidInFull: (row: RangeBillingRow, method: PaymentMethod) => void;
   onMarkUnpaid: (row: RangeBillingRow) => void;
   onStartPartial: (studentId: string) => void;
   onChangePartialAmount: (text: string) => void;
   onCancelPartial: () => void;
-  onSubmitPartial: (row: RangeBillingRow) => void;
+  onSubmitPartial: (row: RangeBillingRow, method: PaymentMethod) => void;
   onMessageSent: (row: RangeBillingRow) => void;
 }
 
@@ -70,6 +74,13 @@ function BillingRowCard({
 }: BillingRowCardProps) {
   // The most recent reminder across every month in the range, if any --
   // there's no single "the" payment once this spans multiple months.
+  // Choosing how a payment came in (cash / check / Zelle) before saving it.
+  const [choosingMethod, setChoosingMethod] = useState(false);
+  const [partialMethod, setPartialMethod] = useState<PaymentMethod[]>(['cash']);
+  const methodsUsed = [
+    ...new Set(row.monthRows.filter((r) => r.payment.amountPaid > 0 && r.payment.method).map((r) => METHOD_LABEL[r.payment.method!])),
+  ];
+
   const lastMessageSentAt = row.monthRows
     .map((r) => r.payment.messageSentAt)
     .filter((d): d is string => !!d)
@@ -90,6 +101,7 @@ function BillingRowCard({
       {row.totalAmountPaid > 0 && (
         <ThemedText type="small" themeColor="textSecondary">
           Paid so far: ${row.totalAmountPaid.toFixed(2)}
+          {methodsUsed.length > 0 ? ` (${methodsUsed.join(', ')})` : ''}
         </ThemedText>
       )}
       {lastMessageSentAt && (
@@ -119,9 +131,9 @@ function BillingRowCard({
             onSent={() => onMessageSent(row)}
           />
           <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-            {row.status !== 'paid' && (
+            {row.status !== 'paid' && !choosingMethod && (
               <View style={{ flex: 1, minWidth: 140 }}>
-                <Button title="Mark Paid in Full" variant="secondary" onPress={() => onMarkPaidInFull(row)} />
+                <Button title="Mark Paid in Full" variant="secondary" onPress={() => setChoosingMethod(true)} />
               </View>
             )}
             {row.status !== 'unpaid' && (
@@ -133,18 +145,46 @@ function BillingRowCard({
               <Button title="Record Partial Payment" variant="ghost" onPress={() => onStartPartial(row.student.id)} />
             </View>
           </View>
+          {choosingMethod && (
+            <View style={{ gap: 6 }}>
+              <ThemedText type="small" themeColor="textSecondary">
+                How was it paid? (Zelle is usually matched from the bank instead — see Reconcile.)
+              </ThemedText>
+              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                {(['cash', 'check', 'zelle'] as PaymentMethod[]).map((m) => (
+                  <View key={m} style={{ flex: 1, minWidth: 80 }}>
+                    <Button
+                      title={METHOD_LABEL[m]}
+                      onPress={() => {
+                        setChoosingMethod(false);
+                        onMarkPaidInFull(row, m);
+                      }}
+                    />
+                  </View>
+                ))}
+                <View style={{ flex: 1, minWidth: 80 }}>
+                  <Button title="Cancel" variant="ghost" onPress={() => setChoosingMethod(false)} />
+                </View>
+              </View>
+            </View>
+          )}
         </>
       )}
 
       {partialFor === row.student.id && (
         <View style={{ gap: 8 }}>
           <TextField label="Amount received ($)" value={partialAmount} onChangeText={onChangePartialAmount} keyboardType="decimal-pad" />
+          <ChipSelect
+            options={(['cash', 'check', 'zelle'] as PaymentMethod[]).map((m) => ({ value: m, label: METHOD_LABEL[m] }))}
+            value={partialMethod}
+            onChange={setPartialMethod}
+          />
           <View style={{ flexDirection: 'row', gap: 10 }}>
             <View style={{ flex: 1 }}>
               <Button title="Cancel" variant="ghost" onPress={onCancelPartial} />
             </View>
             <View style={{ flex: 1 }}>
-              <Button title="Save" onPress={() => onSubmitPartial(row)} />
+              <Button title="Save" onPress={() => onSubmitPartial(row, partialMethod[0])} />
             </View>
           </View>
         </View>
@@ -154,7 +194,7 @@ function BillingRowCard({
 }
 
 export default function BillingScreen() {
-  const { data, getBillingForRange, recordRangePayment, markRangeMessageSent } = useAppData();
+  const { data, getBillingForRange, recordRangePayment, markRangeMessageSent, can } = useAppData();
   // `monthKey` is the anchor/end month -- Prev/Next always moves it one
   // month at a time, exactly like before, whether or not months are
   // combined. `rangeMonths` (default '1', i.e. no combining) controls how
@@ -176,13 +216,14 @@ export default function BillingScreen() {
   // here -- only day/class sections and "no class scheduled".
   const { days, unscheduled } = groupStudentsBySchedule(data.students, data.groups);
 
-  const markPaidInFull = (row: RangeBillingRow) => recordRangePayment(row.student.id, fromMonthKey, monthKey, 0, 'full');
+  const markPaidInFull = (row: RangeBillingRow, method: PaymentMethod) =>
+    recordRangePayment(row.student.id, fromMonthKey, monthKey, 0, 'full', method);
   const markUnpaid = (row: RangeBillingRow) => recordRangePayment(row.student.id, fromMonthKey, monthKey, 0, 'unpaid');
 
-  const submitPartial = (row: RangeBillingRow) => {
+  const submitPartial = (row: RangeBillingRow, method: PaymentMethod) => {
     const amount = Number(partialAmount);
     if (Number.isNaN(amount) || amount <= 0) return alert('Enter a valid amount');
-    recordRangePayment(row.student.id, fromMonthKey, monthKey, amount, 'partial');
+    recordRangePayment(row.student.id, fromMonthKey, monthKey, amount, 'partial', method);
     setPartialFor(null);
     setPartialAmount('');
   };
@@ -206,9 +247,14 @@ export default function BillingScreen() {
 
   return (
     <Screen copyright>
-      <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
-        Billing
-      </ThemedText>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <ThemedText type="title" style={{ fontSize: 28, lineHeight: 34 }}>
+          Billing
+        </ThemedText>
+        {can('bankTransactions:read') && (
+          <Button title="Reconcile with bank" variant="secondary" onPress={() => router.push('/reconcile')} />
+        )}
+      </View>
 
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <Pressable onPress={() => setMonthKey((m) => addMonths(m, -1))} hitSlop={12}>

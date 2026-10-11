@@ -698,6 +698,158 @@ describe('AppDataProvider / useAppData', () => {
       expect(row.payment.messageSentAt).toBeTruthy();
     });
 
+    // Bank reconciliation: deposits pay bills only once a person confirms.
+    describe('bank reconciliation', () => {
+      // Sept: 2 x 1hr, Oct: 1 x 1hr, all at $40/hr -- Ava, parent Priya.
+      async function setupReconcile() {
+        const rendered = await setupBillingScenario();
+        const { result, student } = rendered;
+        const octOcc = result.current.getOccurrencesForDate(new Date(2026, 9, 6))[0];
+        await act(async () => {
+          result.current.saveAttendance(octOcc, { [student.id]: 'present' });
+        });
+        await act(async () => {
+          result.current.setReconcileStartDate('2026-10-01');
+        });
+        return rendered;
+      }
+      const deposit = (id: string, date: string, amount: number, sender?: string) => ({
+        id,
+        date,
+        amount,
+        description: `ZELLE FROM ${sender ?? 'X'}`,
+        ...(sender ? { sender } : {}),
+      });
+
+      it('imports new deposits only: skips ones already imported or dated before the start', async () => {
+        const { result } = await setupReconcile();
+        let counts;
+        await act(async () => {
+          counts = result.current.importDeposits([
+            deposit('wf_A', '2026-11-02', 40, 'PRIYA K'),
+            deposit('wf_OLD', '2026-09-30', 80, 'PRIYA K'), // September money -- before the start
+          ]);
+        });
+        expect(counts).toEqual({ added: 1, alreadyImported: 0, beforeStart: 1 });
+        await act(async () => {
+          counts = result.current.importDeposits([deposit('wf_A', '2026-11-02', 40, 'PRIYA K')]);
+        });
+        expect(counts).toEqual({ added: 0, alreadyImported: 1, beforeStart: 0 });
+        expect(result.current.data.bankTransactions).toEqual([expect.objectContaining({ id: 'wf_A', status: 'new' })]);
+      });
+
+      it('lists only what is still owed from the start month on', async () => {
+        const { result, student } = await setupReconcile();
+        expect(result.current.getOpenItems('2026-11')).toEqual([{ studentId: student.id, month: '2026-10', owed: 40 }]);
+      });
+
+      it('confirming a match pays the bill as Zelle, links the deposit, and remembers the sender', async () => {
+        const { result, student } = await setupReconcile();
+        await act(async () => {
+          result.current.importDeposits([deposit('wf_A', '2026-11-02', 40, 'PRIYA K')]);
+        });
+        await act(async () => {
+          result.current.matchDeposit('wf_A', [{ studentId: student.id, month: '2026-10', amount: 40 }], true);
+        });
+        const oct = result.current.getMonthlyBilling('2026-10')[0].payment;
+        expect(oct).toMatchObject({ amountPaid: 40, status: 'paid', method: 'zelle', datePaid: '2026-11-02' });
+        expect(result.current.data.bankTransactions[0]).toMatchObject({
+          status: 'matched',
+          allocations: [{ studentId: student.id, month: '2026-10', amount: 40 }],
+        });
+        expect(result.current.data.senderRules).toEqual([
+          expect.objectContaining({ id: 'PRIYA K', studentIds: [student.id], ignore: false }),
+        ]);
+        // September (before the start) is untouched.
+        expect(result.current.getMonthlyBilling('2026-09')[0].payment.amountPaid).toBe(0);
+      });
+
+      it('adds to what was already paid (e.g. cash earlier), and records overpaying truthfully', async () => {
+        const { result, student } = await setupReconcile();
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-10', '2026-10', 10, 'partial', 'cash');
+        });
+        await act(async () => {
+          result.current.importDeposits([deposit('wf_A', '2026-11-02', 50, 'PRIYA K')]);
+        });
+        await act(async () => {
+          result.current.matchDeposit('wf_A', [{ studentId: student.id, month: '2026-10', amount: 50 }], false);
+        });
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment).toMatchObject({ amountPaid: 60, status: 'paid' });
+        expect(result.current.data.senderRules).toEqual([]); // not remembered when asked not to
+      });
+
+      it('undo takes back exactly what the match added', async () => {
+        const { result, student } = await setupReconcile();
+        await act(async () => {
+          result.current.recordRangePayment(student.id, '2026-10', '2026-10', 10, 'partial', 'cash');
+        });
+        await act(async () => {
+          result.current.importDeposits([deposit('wf_A', '2026-11-02', 30, 'PRIYA K')]);
+        });
+        await act(async () => {
+          result.current.matchDeposit('wf_A', [{ studentId: student.id, month: '2026-10', amount: 30 }], false);
+        });
+        await act(async () => {
+          result.current.undoDeposit('wf_A');
+        });
+        expect(result.current.getMonthlyBilling('2026-10')[0].payment).toMatchObject({ amountPaid: 10, status: 'partially-paid' });
+        expect(result.current.data.bankTransactions[0]).toMatchObject({ status: 'new', allocations: [] });
+      });
+
+      it('not tutoring: ignores the deposit, can remember the sender, and can be undone', async () => {
+        const { result } = await setupReconcile();
+        await act(async () => {
+          result.current.importDeposits([deposit('wf_PAY', '2026-11-05', 2000, 'MY EMPLOYER')]);
+        });
+        await act(async () => {
+          result.current.ignoreDeposit('wf_PAY', true);
+        });
+        expect(result.current.data.bankTransactions[0].status).toBe('ignored');
+        expect(result.current.data.senderRules[0]).toMatchObject({ id: 'MY EMPLOYER', ignore: true });
+        await act(async () => {
+          result.current.undoDeposit('wf_PAY');
+        });
+        expect(result.current.data.bankTransactions[0].status).toBe('new');
+        // ...and forgets the "not tutoring" it learned from that decision.
+        expect(result.current.data.senderRules).toEqual([]);
+      });
+
+      it('undoing a match forgets the sender rule that match taught -- but not a different one', async () => {
+        const { result, student } = await setupReconcile();
+        await act(async () => {
+          result.current.importDeposits([deposit('wf_A', '2026-11-02', 40, 'PRIYA K'), deposit('wf_B', '2026-11-03', 40, 'OTHER P')]);
+        });
+        await act(async () => {
+          result.current.matchDeposit('wf_A', [{ studentId: student.id, month: '2026-10', amount: 40 }], true);
+        });
+        await act(async () => {
+          result.current.undoDeposit('wf_A');
+        });
+        expect(result.current.data.senderRules).toEqual([]);
+      });
+
+      it('remembers the start date as a shared setting', async () => {
+        const { result } = await setupReconcile();
+        expect(result.current.reconcileStartDate).toBe('2026-10-01');
+        expect(result.current.data.settings).toEqual([
+          expect.objectContaining({ id: 'reconcile', value: { startDate: '2026-10-01' } }),
+        ]);
+      });
+    });
+
+    it('Mark Paid records how it was paid, and clears it when marked unpaid', async () => {
+      const { result, student } = await setupBillingScenario();
+      await act(async () => {
+        result.current.recordRangePayment(student.id, '2026-09', '2026-09', 0, 'full', 'check');
+      });
+      expect(result.current.getMonthlyBilling('2026-09')[0].payment).toMatchObject({ status: 'paid', method: 'check' });
+      await act(async () => {
+        result.current.recordRangePayment(student.id, '2026-09', '2026-09', 0, 'unpaid');
+      });
+      expect(result.current.getMonthlyBilling('2026-09')[0].payment.method).toBeUndefined();
+    });
+
     // Billing is by time: rate (per hour) x (session length + extra time).
     describe('time-based billing', () => {
       it('bills ordinary 1-hour sessions exactly as before (rate x sessions)', async () => {

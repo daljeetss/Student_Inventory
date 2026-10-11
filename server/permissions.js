@@ -18,6 +18,14 @@ const ALL = [
   'sessions:write',
   'payments:read',
   'payments:write',
+  // Bank reconciliation -- money-related, so owner only, like payments.
+  'bankTransactions:read',
+  'bankTransactions:write',
+  'senderRules:read',
+  'senderRules:write',
+  // App-wide settings (e.g. when reconciling starts).
+  'settings:read',
+  'settings:write',
 ];
 
 const ROLE_PERMISSIONS = {

@@ -3,12 +3,19 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { monthKeysInRange, toDateKey, toMonthKey } from '@/data/date';
 import { makeId } from '@/data/id';
 import { lastConflictBy, loadMe, loadResource, Me, reloadResource, ResourceName, saveChanges, SaveOutcome } from '@/data/storage';
+import { ParsedDeposit } from '@/data/bank-csv';
+import { normalizeName, OpenItem } from '@/data/reconcile';
 import {
+  Allocation,
   AppData,
   AttendanceStatus,
+  BankTransaction,
   ClassGroup,
   Payment,
+  PaymentMethod,
   PaymentStatus,
+  SenderRule,
+  Setting,
   SessionRecord,
   Student,
   emptyAppData,
@@ -95,7 +102,7 @@ interface AppDataContextValue {
   }) => SessionRecord;
 
   getMonthlyBilling: (monthKey: string) => BillingRow[];
-  recordPayment: (paymentId: string, amountPaid: number, status: PaymentStatus) => void;
+  recordPayment: (paymentId: string, amountPaid: number, status: PaymentStatus, method?: PaymentMethod) => void;
   markMessageSent: (paymentId: string) => void;
 
   /** Same idea as getMonthlyBilling, but totaled across every month from
@@ -114,8 +121,34 @@ interface AppDataContextValue {
     toMonthKey: string,
     amountPaid: number,
     mode: 'full' | 'partial' | 'unpaid',
+    /** How it was paid (cash / check / zelle) -- recorded on each month it
+     * pays; cleared when marked unpaid. */
+    method?: PaymentMethod,
   ) => void;
   markRangeMessageSent: (studentId: string, fromMonthKey: string, toMonthKey: string) => void;
+
+  // ---- Bank reconciliation (owner only) -- see src/data/reconcile.ts ----
+
+  /** "YYYY-MM-DD": deposits before this are never reconciled, and bills
+   * before its month aren't matched. Defaults to the day it's first needed. */
+  reconcileStartDate: string;
+  setReconcileStartDate: (date: string) => void;
+  /** Everything still owed (amountDue - amountPaid > 0), per student per
+   * month, from the reconcile start month through `throughMonth`. */
+  getOpenItems: (throughMonth: string) => OpenItem[];
+  /** Adds new deposits from a parsed bank CSV. Already-imported ones (same
+   * id) and ones dated before the start date are skipped, and counted. */
+  importDeposits: (deposits: ParsedDeposit[]) => { added: number; alreadyImported: number; beforeStart: number };
+  /** Confirms a deposit pays these student-months: adds each amount to
+   * that month's payment (method zelle), marks the deposit matched, and --
+   * if `rememberSender` -- remembers this sender pays for these students. */
+  matchDeposit: (transactionId: string, allocations: Allocation[], rememberSender: boolean) => void;
+  /** Marks a deposit as not tutoring money (optionally for this sender
+   * from now on). */
+  ignoreDeposit: (transactionId: string, rememberSender: boolean) => void;
+  /** Takes back a match (subtracting exactly what it added to each
+   * payment) or an ignore; the deposit goes back to "to review". */
+  undoDeposit: (transactionId: string) => void;
 }
 
 export interface BillingRow {
@@ -159,7 +192,19 @@ const RESOURCE_FOR: Record<keyof AppData, ResourceName> = {
   groups: 'classes',
   sessions: 'sessions',
   payments: 'payments',
+  bankTransactions: 'bankTransactions',
+  senderRules: 'senderRules',
+  settings: 'settings',
 };
+
+const RECONCILE_SETTING_ID = 'reconcile';
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** A payment's status from what's due and what's been paid. */
+function statusFor(amountDue: number, amountPaid: number): PaymentStatus {
+  if (amountPaid <= 0) return 'unpaid';
+  return amountPaid >= amountDue ? 'paid' : 'partially-paid';
+}
 
 export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(emptyAppData);
@@ -186,14 +231,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       // Four independent resources -- see server/db/ and DESIGN.md. A
       // problem loading one never takes the others down with it (each
       // falls back to an empty list on its own).
-      const [students, groups, sessions, payments, signedIn] = await Promise.all([
+      const [students, groups, sessions, payments, bankTransactions, senderRules, settings, signedIn] = await Promise.all([
         loadResource<Student>('students'),
         loadResource<ClassGroup>('classes'),
         loadResource<SessionRecord>('sessions'),
         loadResource<Payment>('payments'),
+        loadResource<BankTransaction>('bankTransactions'),
+        loadResource<SenderRule>('senderRules'),
+        loadResource<Setting>('settings'),
         loadMe(),
       ]);
-      const loaded: AppData = { students, groups, sessions, payments };
+      const loaded: AppData = { students, groups, sessions, payments, bankTransactions, senderRules, settings };
       dataRef.current = loaded;
       setData(loaded);
       setMe(signedIn);
@@ -263,6 +311,12 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const persistGroups = useCallback((groups: ClassGroup[]) => persist('groups', groups), [persist]);
   const persistSessions = useCallback((sessions: SessionRecord[]) => persist('sessions', sessions), [persist]);
   const persistPayments = useCallback((payments: Payment[]) => persist('payments', payments), [persist]);
+  const persistBankTransactions = useCallback(
+    (bankTransactions: BankTransaction[]) => persist('bankTransactions', bankTransactions),
+    [persist],
+  );
+  const persistSenderRules = useCallback((senderRules: SenderRule[]) => persist('senderRules', senderRules), [persist]);
+  const persistSettings = useCallback((settings: Setting[]) => persist('settings', settings), [persist]);
 
   const addStudent = useCallback<AppDataContextValue['addStudent']>(
     (input) => {
@@ -564,12 +618,18 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const recordPayment = useCallback<AppDataContextValue['recordPayment']>(
-    (paymentId, amountPaid, status) => {
+    (paymentId, amountPaid, status, method) => {
       const resolved = resolvePayment(paymentId);
       if (!resolved) return;
       const next = resolved.payments.map((p) =>
         p.id === paymentId
-          ? { ...p, amountPaid, status, datePaid: status === 'unpaid' ? undefined : new Date().toISOString() }
+          ? {
+              ...p,
+              amountPaid,
+              status,
+              datePaid: status === 'unpaid' ? undefined : new Date().toISOString(),
+              method: status === 'unpaid' ? undefined : (method ?? p.method),
+            }
           : p,
       );
       persistPayments(next);
@@ -653,7 +713,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const recordRangePayment = useCallback<AppDataContextValue['recordRangePayment']>(
-    (studentId, fromMonthKey, toMonthKey, amountPaid, mode) => {
+    (studentId, fromMonthKey, toMonthKey, amountPaid, mode, method) => {
       const { rows, byId } = resolveRangePayments(studentId, fromMonthKey, toMonthKey);
       const now = new Date().toISOString();
       let remaining = amountPaid;
@@ -661,9 +721,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       for (const row of rows) {
         const current = byId.get(row.payment.id)!;
         if (mode === 'unpaid') {
-          byId.set(current.id, { ...current, amountPaid: 0, status: 'unpaid', datePaid: undefined });
+          byId.set(current.id, { ...current, amountPaid: 0, status: 'unpaid', datePaid: undefined, method: undefined });
         } else if (mode === 'full') {
-          byId.set(current.id, { ...current, amountPaid: current.amountDue, status: 'paid', datePaid: now });
+          byId.set(current.id, {
+            ...current,
+            amountPaid: current.amountDue,
+            status: 'paid',
+            datePaid: now,
+            method: method ?? current.method,
+          });
         } else {
           // partial: pay down the oldest month's outstanding balance
           // first, then the next, same as paying down a running tab.
@@ -677,6 +743,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             amountPaid: newAmountPaid,
             status: newAmountPaid >= current.amountDue ? 'paid' : 'partially-paid',
             datePaid: now,
+            method: method ?? current.method,
           });
         }
       }
@@ -697,6 +764,195 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       persistPayments(Array.from(byId.values()));
     },
     [persistPayments, resolveRangePayments],
+  );
+
+  // ---------- bank reconciliation ----------
+
+  const storedStart = (data.settings.find((st) => st.id === RECONCILE_SETTING_ID)?.value as { startDate?: string } | undefined)
+    ?.startDate;
+  // Until it's saved (the Reconcile screen saves it the first time it's
+  // opened), "today" -- so nothing older is ever reconciled by accident.
+  const reconcileStartDate = storedStart ?? toDateKey(new Date());
+
+  const setReconcileStartDate = useCallback<AppDataContextValue['setReconcileStartDate']>(
+    (date) => {
+      const existing = dataRef.current.settings.find((st) => st.id === RECONCILE_SETTING_ID);
+      const record: Setting = {
+        id: RECONCILE_SETTING_ID,
+        value: { startDate: date },
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
+      };
+      persistSettings([...dataRef.current.settings.filter((st) => st.id !== RECONCILE_SETTING_ID), record]);
+    },
+    [persistSettings],
+  );
+
+  const getOpenItems = useCallback<AppDataContextValue['getOpenItems']>(
+    (throughMonth) => {
+      const startMonth = reconcileStartDate.slice(0, 7);
+      if (throughMonth < startMonth) return [];
+      const items: OpenItem[] = [];
+      for (const month of monthKeysInRange(startMonth, throughMonth)) {
+        for (const row of getMonthlyBilling(month)) {
+          const owed = round2(row.payment.amountDue - row.payment.amountPaid);
+          if (owed > 0) items.push({ studentId: row.student.id, month, owed });
+        }
+      }
+      return items;
+    },
+    [getMonthlyBilling, reconcileStartDate],
+  );
+
+  const importDeposits = useCallback<AppDataContextValue['importDeposits']>(
+    (deposits) => {
+      const existing = new Set(dataRef.current.bankTransactions.map((t) => t.id));
+      const now = new Date().toISOString();
+      const added: BankTransaction[] = [];
+      let alreadyImported = 0;
+      let beforeStart = 0;
+      for (const d of deposits) {
+        if (existing.has(d.id)) alreadyImported++;
+        else if (d.date < reconcileStartDate) beforeStart++;
+        else {
+          existing.add(d.id);
+          added.push({ ...d, status: 'new', allocations: [], importedAt: now, createdAt: now });
+        }
+      }
+      if (added.length > 0) persistBankTransactions([...dataRef.current.bankTransactions, ...added]);
+      return { added: added.length, alreadyImported, beforeStart };
+    },
+    [persistBankTransactions, reconcileStartDate],
+  );
+
+  /** The payment for a student's month: the saved one, else the same
+   * snapshot getMonthlyBilling would make. */
+  const paymentFor = useCallback(
+    (payments: Map<string, Payment>, studentId: string, month: string): Payment => {
+      const saved = [...payments.values()].find((p) => p.studentId === studentId && p.month === month);
+      if (saved) return saved;
+      const row = getMonthlyBilling(month).find((r) => r.student.id === studentId);
+      return (
+        row?.payment ?? {
+          id: `pay_${studentId}_${month}`,
+          studentId,
+          month,
+          amountDue: 0,
+          amountPaid: 0,
+          status: 'unpaid',
+          createdAt: new Date().toISOString(),
+        }
+      );
+    },
+    [getMonthlyBilling],
+  );
+
+  const rememberSender = useCallback(
+    (sender: string | undefined, studentIds: string[], ignore: boolean) => {
+      if (!sender) return;
+      const id = normalizeName(sender);
+      const existing = dataRef.current.senderRules.find((r) => r.id === id);
+      const rule: SenderRule = {
+        id,
+        sender: id,
+        studentIds: ignore ? [] : [...new Set(studentIds)],
+        ignore,
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
+      };
+      persistSenderRules([...dataRef.current.senderRules.filter((r) => r.id !== id), rule]);
+    },
+    [persistSenderRules],
+  );
+
+  const updateTransaction = useCallback(
+    (id: string, change: (t: BankTransaction) => BankTransaction) =>
+      persistBankTransactions(dataRef.current.bankTransactions.map((t) => (t.id === id ? change(t) : t))),
+    [persistBankTransactions],
+  );
+
+  const matchDeposit = useCallback<AppDataContextValue['matchDeposit']>(
+    (transactionId, allocations, remember) => {
+      const tx = dataRef.current.bankTransactions.find((t) => t.id === transactionId);
+      if (!tx || tx.status !== 'new' || allocations.length === 0) return;
+      const byId = new Map(dataRef.current.payments.map((p) => [p.id, p]));
+      for (const a of allocations) {
+        const current = paymentFor(byId, a.studentId, a.month);
+        const amountPaid = round2(current.amountPaid + a.amount);
+        byId.set(current.id, {
+          ...current,
+          amountPaid,
+          status: statusFor(current.amountDue, amountPaid),
+          method: 'zelle',
+          datePaid: tx.date,
+        });
+      }
+      // Payments first: the one queue saves them before the deposit that
+      // points at them.
+      persistPayments([...byId.values()]);
+      updateTransaction(transactionId, (t) => ({
+        ...t,
+        status: 'matched',
+        allocations,
+        resolvedAt: new Date().toISOString(),
+      }));
+      if (remember) rememberSender(tx.sender, allocations.map((a) => a.studentId), false);
+    },
+    [paymentFor, persistPayments, rememberSender, updateTransaction],
+  );
+
+  const ignoreDeposit = useCallback<AppDataContextValue['ignoreDeposit']>(
+    (transactionId, remember) => {
+      const tx = dataRef.current.bankTransactions.find((t) => t.id === transactionId);
+      if (!tx || tx.status !== 'new') return;
+      updateTransaction(transactionId, (t) => ({
+        ...t,
+        status: 'ignored',
+        note: 'Not tutoring',
+        resolvedAt: new Date().toISOString(),
+      }));
+      if (remember) rememberSender(tx.sender, [], true);
+    },
+    [rememberSender, updateTransaction],
+  );
+
+  const undoDeposit = useCallback<AppDataContextValue['undoDeposit']>(
+    (transactionId) => {
+      const tx = dataRef.current.bankTransactions.find((t) => t.id === transactionId);
+      if (!tx || tx.status === 'new') return;
+      if (tx.status === 'matched') {
+        const byId = new Map(dataRef.current.payments.map((p) => [p.id, p]));
+        for (const a of tx.allocations) {
+          const current = [...byId.values()].find((p) => p.studentId === a.studentId && p.month === a.month);
+          if (!current) continue;
+          const amountPaid = Math.max(0, round2(current.amountPaid - a.amount));
+          byId.set(current.id, {
+            ...current,
+            amountPaid,
+            status: statusFor(current.amountDue, amountPaid),
+            ...(amountPaid === 0 ? { method: undefined, datePaid: undefined } : {}),
+          });
+        }
+        persistPayments([...byId.values()]);
+      }
+      updateTransaction(transactionId, (t) => {
+        const { resolvedAt: _r, note: _n, ...rest } = t;
+        return { ...rest, status: 'new', allocations: [] };
+      });
+      // Also forget what this decision taught, if that's what's remembered
+      // -- otherwise undoing a mistaken "not tutoring" (or a wrong match)
+      // would keep suggesting the same mistake for this sender.
+      if (tx.sender) {
+        const id = normalizeName(tx.sender);
+        const rule = dataRef.current.senderRules.find((r) => r.id === id);
+        const taughtStudents = [...new Set(tx.allocations.map((a) => a.studentId))].sort().join(',');
+        const sameAsDecision =
+          rule &&
+          (tx.status === 'ignored'
+            ? rule.ignore
+            : !rule.ignore && [...rule.studentIds].sort().join(',') === taughtStudents);
+        if (sameAsDecision) persistSenderRules(dataRef.current.senderRules.filter((r) => r.id !== id));
+      }
+    },
+    [persistPayments, persistSenderRules, updateTransaction],
   );
 
   const can = useCallback((permission: string) => !me || me.permissions.includes(permission), [me]);
@@ -722,6 +978,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       getBillingForRange,
       recordRangePayment,
       markRangeMessageSent,
+      reconcileStartDate,
+      setReconcileStartDate,
+      getOpenItems,
+      importDeposits,
+      matchDeposit,
+      ignoreDeposit,
+      undoDeposit,
     }),
     [
       data,
@@ -743,6 +1006,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       getBillingForRange,
       recordRangePayment,
       markRangeMessageSent,
+      reconcileStartDate,
+      setReconcileStartDate,
+      getOpenItems,
+      importDeposits,
+      matchDeposit,
+      ignoreDeposit,
+      undoDeposit,
     ],
   );
 

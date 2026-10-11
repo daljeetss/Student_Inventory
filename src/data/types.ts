@@ -74,6 +74,10 @@ export interface SessionRecord {
 
 export type PaymentStatus = 'unpaid' | 'partially-paid' | 'paid';
 
+/** How a payment came in. Zelle is set by bank reconciliation; cash and
+ * check are recorded by hand on Mark Paid. */
+export type PaymentMethod = 'zelle' | 'cash' | 'check' | 'other';
+
 export interface Payment {
   id: string;
   studentId: string;
@@ -83,8 +87,61 @@ export interface Payment {
   amountDue: number;
   amountPaid: number;
   status: PaymentStatus;
+  method?: PaymentMethod;
   datePaid?: string;
   messageSentAt?: string;
+  createdAt: string;
+}
+
+/** Part of a matched bank deposit: this much paid for this student's
+ * month (a deposit can be split across siblings and months). */
+export interface Allocation {
+  studentId: string;
+  /** "YYYY-MM" */
+  month: string;
+  amount: number;
+}
+
+/** One deposit imported from the bank's CSV export (money coming in only). */
+export interface BankTransaction {
+  /** Stable across re-imports, so importing overlapping dates never
+   * duplicates: "wf_<Zelle ref #>", or a hash of the row for others. */
+  id: string;
+  /** "YYYY-MM-DD" */
+  date: string;
+  amount: number;
+  /** The bank's full description, as exported. */
+  description: string;
+  /** Who sent it, for Zelle ("PRIYA SHARMA"). */
+  sender?: string;
+  /** The note the sender added, if any ("AVA OCT"). */
+  memo?: string;
+  reference?: string;
+  /** new = needs review; matched = paid bills (see allocations);
+   * ignored = not tutoring money. */
+  status: 'new' | 'matched' | 'ignored';
+  allocations: Allocation[];
+  note?: string;
+  importedAt: string;
+  resolvedAt?: string;
+  createdAt: string;
+}
+
+/** Remembered from a confirmed match: "Zelle from <sender> pays for these
+ * students" -- or, with ignore, "is not tutoring money". */
+export interface SenderRule {
+  /** The normalized sender name (same as `sender`). */
+  id: string;
+  sender: string;
+  studentIds: string[];
+  ignore: boolean;
+  createdAt: string;
+}
+
+/** App-wide settings, one JSON value per key. */
+export interface Setting {
+  id: string;
+  value: unknown;
   createdAt: string;
 }
 
@@ -93,6 +150,9 @@ export interface AppData {
   groups: ClassGroup[];
   sessions: SessionRecord[];
   payments: Payment[];
+  bankTransactions: BankTransaction[];
+  senderRules: SenderRule[];
+  settings: Setting[];
 }
 
 export const emptyAppData: AppData = {
@@ -100,4 +160,7 @@ export const emptyAppData: AppData = {
   groups: [],
   sessions: [],
   payments: [],
+  bankTransactions: [],
+  senderRules: [],
+  settings: [],
 };

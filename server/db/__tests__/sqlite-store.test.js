@@ -109,7 +109,7 @@ describe('a new, empty store', () => {
     expect(tables).toEqual(
       expect.arrayContaining(['students', 'classes', 'class_students', 'class_slots', 'sessions', 'session_students', 'payments']),
     );
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(3);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(4);
   });
 });
 
@@ -184,6 +184,59 @@ describe('round-tripping every kind of record exactly', () => {
     const p = payment('pay_s1_2026-09', 's1', { amountPaid: 60, status: 'paid', datePaid: '2026-09-20', messageSentAt: '2026-09-19' });
     await store.putRecord('payments', p.id, p, null);
     expect(withoutVersion(store.getResource('payments'))).toEqual([p]);
+    store.close();
+  });
+
+  it('payments record how they were paid', async () => {
+    const store = openStore(dataDir);
+    await store.putRecord('students', 's1', student('s1'), null);
+    const p = payment('pay_s1_2026-10', 's1', { amountPaid: 60, status: 'paid', method: 'cash' });
+    await store.putRecord('payments', p.id, p, null);
+    expect(withoutVersion(store.getResource('payments'))).toEqual([p]);
+    await expect(store.putRecord('payments', 'x', payment('x', 's1', { method: 'bitcoin' }), null)).rejects.toThrow(ValidationError);
+    store.close();
+  });
+
+  it('bank transactions, with how a deposit was split across students and months', async () => {
+    const store = openStore(dataDir);
+    for (const id of ['s1', 's2']) await store.putRecord('students', id, student(id), null);
+    const unmatched = {
+      id: 'wf_REF1', date: '2026-11-02', amount: 180, description: 'ZELLE FROM A PARENT ON 11/02 REF # REF1 KID',
+      sender: 'A PARENT', memo: 'KID', reference: 'REF1', status: 'new', allocations: [],
+      importedAt: '2026-11-03T00:00:00.000Z', createdAt: '2026-11-03T00:00:00.000Z',
+    };
+    await store.putRecord('bankTransactions', unmatched.id, unmatched, null);
+    const matched = {
+      ...unmatched, status: 'matched', resolvedAt: '2026-11-03T01:00:00.000Z',
+      allocations: [{ studentId: 's1', month: '2026-10', amount: 90 }, { studentId: 's2', month: '2026-10', amount: 90 }],
+    };
+    await store.putRecord('bankTransactions', matched.id, matched, 1);
+    expect(withoutVersion(store.getResource('bankTransactions'))).toEqual([matched]);
+
+    const ignored = { id: 'wf_X', date: '2026-11-04', amount: 2000, description: 'PAYROLL', status: 'ignored', allocations: [],
+      note: 'not tutoring', importedAt: 'x', createdAt: 'x' };
+    await store.putRecord('bankTransactions', ignored.id, ignored, null);
+    expect(withoutVersion(store.getResource('bankTransactions'))[1]).toEqual(ignored);
+
+    await expect(store.putRecord('bankTransactions', 'bad', { ...unmatched, id: 'bad', status: 'weird' }, null)).rejects.toThrow(ValidationError);
+    await expect(
+      store.putRecord('bankTransactions', 'bad', { ...unmatched, id: 'bad', allocations: [{ studentId: 'ghost', month: '2026-10', amount: 1 }] }, null),
+    ).rejects.toThrow(ValidationError);
+    store.close();
+  });
+
+  it('sender rules and settings', async () => {
+    const store = openStore(dataDir);
+    for (const id of ['s1', 's2']) await store.putRecord('students', id, student(id), null);
+    const rule = { id: 'A PARENT', sender: 'A PARENT', studentIds: ['s2', 's1'], ignore: false, createdAt: 'x' };
+    const ignoreRule = { id: 'MY EMPLOYER', sender: 'MY EMPLOYER', studentIds: [], ignore: true, createdAt: 'x' };
+    await store.putRecord('senderRules', rule.id, rule, null);
+    await store.putRecord('senderRules', ignoreRule.id, ignoreRule, null);
+    expect(withoutVersion(store.getResource('senderRules'))).toEqual([rule, ignoreRule]);
+
+    const setting = { id: 'reconcile', value: { startDate: '2026-10-11' }, createdAt: 'x' };
+    await store.putRecord('settings', setting.id, setting, null);
+    expect(withoutVersion(store.getResource('settings'))).toEqual([setting]);
     store.close();
   });
 
@@ -428,8 +481,8 @@ describe('upgrading a v1 database (real tables, before extra time) to v2', () =>
     expect(store.getResource('sessions')[0].extraMinutes).toEqual({ s1: 30 });
     store.close();
 
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(3);
-    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v3-'))).toBe(true);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(4);
+    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v4-'))).toBe(true);
   });
 
   it('refuses to open a database from a newer version of the app', () => {

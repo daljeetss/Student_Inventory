@@ -20,7 +20,14 @@ import { Platform } from 'react-native';
 // stays usable for a moment if the server blips -- but the server copy
 // wins whenever it's reachable.
 
-export type ResourceName = 'students' | 'classes' | 'sessions' | 'payments';
+export type ResourceName =
+  | 'students'
+  | 'classes'
+  | 'sessions'
+  | 'payments'
+  | 'bankTransactions'
+  | 'senderRules'
+  | 'settings';
 
 /**
  * - 'saved': reached the shared server (or native local storage).

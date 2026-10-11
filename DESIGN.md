@@ -743,6 +743,65 @@ by default, move month by month" (unchanged) and "combine multiple months"
 (new) the same feature at two different widths instead of two separate
 implementations to keep in sync.
 
+## Bank reconciliation
+
+Matching Zelle deposits to bills, so "what came in" and "what's marked
+paid" agree. Owner-only, and built the same way as everything else: three
+new record types (schema v4) saved through the per-record API with
+versions, conflicts, backups, and permissions; the business logic runs in
+the app, using the existing billing functions — so Billing stays the one
+source of truth.
+
+- **Records** (`src/data/types.ts`, tables in `sqlite-store.js` v4):
+  `bankTransactions` (one imported deposit; `status` new | matched |
+  ignored; `allocations` = how a matched deposit was split across
+  student-months, table `bank_allocations`), `senderRules` (remembered
+  "sender X pays for students …" or "…is not tutoring", table
+  `sender_rule_students`), `settings` (key → JSON; `reconcile.startDate`),
+  and `Payment.method` (zelle | cash | check | other). New permissions
+  `bankTransactions:*`, `senderRules:*`, `settings:*` — owner only.
+- **Import** (`src/data/bank-csv.ts`, pure): Wells Fargo's current layout
+  (header `DATE, DESCRIPTION, AMOUNT, CHECK #, STATUS`) and the older
+  headerless one. Keeps only **posted, incoming** rows. Zelle descriptions
+  (`ZELLE FROM <sender> ON MM/DD REF # <ref> <note>`) yield sender, note
+  and reference; the id is `wf_<ref>`, or a hash of date|amount|description
+  (+ a repeat counter, so two identical same-day check deposits stay two)
+  — so re-importing overlapping ranges never duplicates. `importDeposits`
+  also skips anything dated before the start date.
+- **Suggestions** (`src/data/reconcile.ts`, pure, never writes anything):
+  remembered sender → a child's name in the note → the sender vs. parent
+  names (all of a parent's children) → for a deposit with **no name only**,
+  the amount alone when exactly one student owes exactly that. Name
+  matching is deliberately conservative — exact, possessive "S", short
+  form at the start/end ("RAMA"/"RAMAKRISHNA", "ANNA"/"SUSANNA"), equal
+  ignoring "H" ("SHREYA"/"SREYA"), or one letter off with the same first
+  letter — because two letters off produced a wrong match on the real data
+  (two different parents' names, e.g. "MAHESH" vs "RAMESH"). A named sender who matches nobody gets **no
+  guess** (it's usually someone not yet known; one confirmation teaches
+  it). The amount is spread over what's owed from the start month on —
+  months named in the note first, then oldest first; ending partway through
+  a bill, or exceeding what's owed, is flagged as a warning with the
+  difference (overpaying puts the extra on the newest month, so it's
+  recorded rather than lost).
+- **Confirm / not tutoring / undo** (`store.tsx`: `matchDeposit`,
+  `ignoreDeposit`, `undoDeposit`): confirming **adds** each allocation to
+  that month's payment (method zelle, `datePaid` = deposit date) — so cash
+  already recorded isn't overwritten — saves payments before the deposit
+  that points at them, and optionally remembers the sender. Undo subtracts
+  exactly what was added, and forgets the sender rule if it's the one that
+  decision taught.
+- **Start date** (`reconcileStartDate`): saved the first time the
+  Reconcile screen is opened (so the default can't creep forward daily);
+  deposits before it are skipped at import, bills before its month are
+  never matched. Chosen so nothing before reconciling began (August,
+  September) is touched.
+
+Tested against the real export's format (headers, Zelle descriptions,
+notes) — and, read-only in scratch, against the real student list: 9 of 13
+real deposits suggested correctly, 4 left for a person (an LLC and senders
+who aren't the recorded parent), 0 wrong. The repo's tests use only
+made-up names and amounts.
+
 ## WhatsApp reminders
 
 There's no WhatsApp API integration — `src/data/whatsapp.ts` builds a

@@ -278,6 +278,13 @@ describe('separate logins and roles', () => {
     expect(me.permissions).not.toContain('payments:read');
   });
 
+  it("a tutor can't see bank data, remembered senders, or settings", async () => {
+    for (const r of ['bankTransactions', 'senderRules', 'settings']) {
+      expect((await as(tutorToken, r)).status).toBe(403);
+      expect((await as(token, r)).status).toBe(200);
+    }
+  });
+
   it('a tutor can read students and classes but gets 403 for payments', async () => {
     expect((await as(tutorToken, 'students')).status).toBe(200);
     expect((await as(tutorToken, 'classes')).status).toBe(200);

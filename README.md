@@ -186,6 +186,44 @@ while using the app.
   localStorage on web), separate per device. This only matters for active
   development; day-to-day use should go through `npm run serve`.
 
+## Reconciling with your bank (Wells Fargo)
+
+**Billing → Reconcile with bank** (owners only) checks which Zelle
+deposits paid which bills:
+
+1. In Wells Fargo online: **Account activity → Download account activity →
+   Comma Delimited (CSV)**. Any date range is fine — overlapping imports are
+   safe, nothing is ever imported twice.
+2. **Import Wells Fargo CSV** and pick the file (from a browser — the Mac or
+   a phone). Only money coming in is kept; outgoing money, and deposits
+   still *pending*, are skipped (import again once they've posted).
+3. For each deposit the app suggests who and which month(s) it pays for,
+   and says why — the child's name in the Zelle note ("AVA OCT"), the
+   sender matching a parent, siblings paid together, or (for a check with
+   no name) the only student who owes exactly that amount. **Nothing is
+   marked paid until you tap Confirm.**
+   - **Pick student** if the suggestion is wrong or missing (someone the
+     app doesn't know, e.g. the other parent or a company name).
+   - **Not tutoring** for personal deposits (paychecks, transfers…).
+   - **Remember … for next time** (on by default): the app learns that
+     sender, so next month it's automatic.
+   - If the amount doesn't match what the app billed, it's **flagged** — e.g.
+     "Paid $30 more than the app billed — check attendance is complete".
+     Check attendance first if a class is missing; Confirm records exactly
+     what was received.
+4. **Undo** reverses a confirm (or a "not tutoring") exactly, and forgets
+   what that decision taught.
+
+**Reconciling starts on a date** (shown at the top; set the first time the
+screen is opened, changeable). Deposits before it are skipped and bills
+before its month are never touched — earlier months stay as they were.
+
+**Cash and checks:** when marking a bill paid in Billing you now pick
+**Cash / Check / Zelle**, so the monthly summary on the Reconcile screen
+(billed · received by Zelle · cash · check · still owed, by student) adds
+up. Bank data stays on this Mac and in your encrypted backups; tutor
+logins can't see any of it.
+
 ## Using it away from home Wi-Fi (Tailscale, free)
 
 [Tailscale](https://tailscale.com) makes a private network between your
@@ -205,6 +243,15 @@ One-time setup (about 15 minutes):
    ```
    It prints the address, like `https://your-mac.tail1234.ts.net`. This
    stays on across restarts.
+
+   *If the main address is already used by something else* (on this Mac,
+   the alpaca bot's dashboard is on it), give this app its own HTTPS port
+   instead — the other one keeps working unchanged:
+   ```
+   /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --https=8443 8899
+   ```
+   The address is then `https://your-mac.tail1234.ts.net:8443`. `npm run
+   users -- link` finds whichever one forwards to this app on its own.
 4. **Each phone:** install the Tailscale app (App Store / Play Store) and
    sign in **with the same account** as the Mac.
 5. **New links include the Tailscale address automatically** — `npm run
@@ -345,6 +392,8 @@ src/
     storage.ts    saves only changed records to the server (with
                   version checks), else falls back to on-device storage
     whatsapp.ts   builds the due-amount/reminder messages + wa.me links
+    bank-csv.ts   reads a Wells Fargo CSV export into deposits
+    reconcile.ts  suggests which student/month a deposit pays for
     date.ts       date/time formatting helpers
     __tests__/    unit tests for the above (npm test)
   utils/

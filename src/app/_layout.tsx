@@ -15,6 +15,7 @@ export default function RootLayout() {
           <Stack.Screen name="group/[id]" options={{ headerShown: true, title: 'Class' }} />
           <Stack.Screen name="group/new" options={{ headerShown: true, title: 'Add Class', presentation: 'modal' }} />
           <Stack.Screen name="session/[id]" options={{ headerShown: true, title: 'Attendance', presentation: 'modal' }} />
+          <Stack.Screen name="reconcile" options={{ headerShown: true, title: 'Reconcile with bank' }} />
         </Stack>
       </ThemeProvider>
     </AppDataProvider>
