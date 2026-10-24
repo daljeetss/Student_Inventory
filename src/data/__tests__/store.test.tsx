@@ -897,6 +897,33 @@ describe('AppDataProvider / useAppData', () => {
         expect(result.current.getBillingForRange('2026-09', '2026-09')[0].totalMinutesAttended).toBe(150);
       });
 
+      it('charges a no-show like a class attended -- but not an absence', async () => {
+        const { result, student } = await setupBillingScenario(); // Sept 1 + Sept 8, present, 1 hr, $40/hr
+        const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'no-show' });
+        });
+        let row = result.current.getMonthlyBilling('2026-09')[0];
+        expect(row).toMatchObject({ sessionsAttended: 2, noShowSessions: 1, minutesAttended: 120, amountDue: 80 });
+        expect(result.current.getBillingForRange('2026-09', '2026-09')[0].totalNoShows).toBe(1);
+
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'absent' });
+        });
+        row = result.current.getMonthlyBilling('2026-09')[0];
+        expect(row).toMatchObject({ sessionsAttended: 1, noShowSessions: 0, amountDue: 40 });
+      });
+
+      it("a no-show can't have extra time (they weren't there)", async () => {
+        const { result, student } = await setupBillingScenario();
+        const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];
+        await act(async () => {
+          result.current.saveAttendance(occ, { [student.id]: 'no-show' }, { [student.id]: 30 });
+        });
+        expect(result.current.data.sessions.find((x) => x.id === occ.id)!.extraMinutes).toBeUndefined();
+        expect(result.current.getMonthlyBilling('2026-09')[0].amountDue).toBe(80);
+      });
+
       it('drops extra time for anyone not marked present, and can remove it again', async () => {
         const { result, student } = await setupBillingScenario();
         const occ = result.current.getOccurrencesForDate(new Date(2026, 8, 8))[0];

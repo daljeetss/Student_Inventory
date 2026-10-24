@@ -674,6 +674,17 @@ cent (`BillingRow.minutesAttended`, `RangeBillingRow.totalMinutesAttended`).
   saved. Stored in `session_students.extra_minutes` (schema v2, an
   additive column — see "Upgrading" above; v1 databases get it via
   `upgradeSchema`, after a never-pruned `pre-migration-v2-*.db` snapshot).
+- **Charged attendance** is `CHARGED_STATUSES` = present and **no-show**
+  (didn't come, didn't tell — charged at the session's length; never extra
+  time, and no makeup prompt). Absent (they told you) isn't charged and is
+  the only status that offers a makeup. `BillingRow.noShowSessions` /
+  `RangeBillingRow.totalNoShows` let Billing and the WhatsApp message say
+  "incl. 1 no-show". Schema v5 allows 'no-show' in
+  `session_students.attendance`: SQLite can't change a CHECK rule in place,
+  so that table is rebuilt (copy → drop → rename) inside the upgrade
+  transaction, and `upgradeSchema` compares every attendance row before
+  and after, refusing the upgrade on any difference. Rehearsed on a copy
+  of the real data: 82 records identical.
 - **Nothing due ≠ paid.** A period with $0 due and $0 paid has its own
   `'nothing-due'` status (badge "Nothing due"), so the start of a month
   doesn't show everyone as Paid.

@@ -34,6 +34,12 @@ describe('buildDueMessage', () => {
     expect(buildDueMessage(student, '2026-08', 2, 150, 100)).toContain('2 sessions, 2.5 hours x $40.00/hour');
   });
 
+  it('names no-shows, so the parent sees why a missed class is charged', () => {
+    expect(buildDueMessage(student, '2026-08', 4, 240, 160, 1)).toContain('4 sessions incl. 1 no-show, 4 hours');
+    expect(buildDueMessage(student, '2026-08', 4, 240, 160, 2)).toContain('incl. 2 no-shows');
+    expect(buildDueMessage(student, '2026-08', 4, 240, 160)).not.toContain('no-show');
+  });
+
   it('uses singular "session" and "hour" for exactly one', () => {
     const msg = buildDueMessage(student, '2026-08', 1, 60, 40);
     expect(msg).toContain('1 session, 1 hour x');

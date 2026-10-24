@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { useTheme } from '@/hooks/use-theme';
 
-type Variant = 'primary' | 'secondary' | 'danger' | 'ghost';
+type Variant = 'primary' | 'secondary' | 'danger' | 'warning' | 'ghost';
 
 interface ButtonProps {
   title: string;
@@ -21,10 +21,12 @@ export function Button({ title, onPress, variant = 'primary', disabled, loading 
       ? theme.primary
       : variant === 'danger'
         ? theme.danger
+        : variant === 'warning'
+          ? theme.warning
         : variant === 'secondary'
           ? theme.backgroundElement
           : 'transparent';
-  const textColor = variant === 'primary' || variant === 'danger' ? '#ffffff' : theme.text;
+  const textColor = variant === 'primary' || variant === 'danger' || variant === 'warning' ? '#ffffff' : theme.text;
 
   return (
     <Pressable

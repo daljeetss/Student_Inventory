@@ -161,7 +161,24 @@ export default function SessionScreen() {
                 onPress={() => setStatus(sid, 'absent')}
               />
             </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="No Show"
+                variant={draft[sid] === 'no-show' ? 'warning' : 'secondary'}
+                onPress={() => setStatus(sid, 'no-show')}
+              />
+            </View>
           </View>
+          {draft[sid] === 'absent' && (
+            <ThemedText type="small" themeColor="textSecondary">
+              Absent — they let you know, so this class isn't charged.
+            </ThemedText>
+          )}
+          {draft[sid] === 'no-show' && (
+            <ThemedText type="small" themeColor="textSecondary">
+              No show — didn't come and didn't tell you, so this class is still charged.
+            </ThemedText>
+          )}
           {draft[sid] === 'present' && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <ThemedText type="small" themeColor="textSecondary" style={{ flex: 1 }}>

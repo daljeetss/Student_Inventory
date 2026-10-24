@@ -18,6 +18,7 @@ import {
   Setting,
   SessionRecord,
   Student,
+  CHARGED_STATUSES,
   emptyAppData,
 } from '@/data/types';
 import { alert } from '@/utils/alert';
@@ -153,7 +154,10 @@ interface AppDataContextValue {
 
 export interface BillingRow {
   student: Student;
+  /** Sessions charged: attended plus no-shows. */
   sessionsAttended: number;
+  /** How many of those were no-shows (charged, but didn't come). */
+  noShowSessions: number;
   /** Total time attended: each session's length plus any extra time. */
   minutesAttended: number;
   /** ratePerSession (per hour) x minutesAttended / 60, to the cent. */
@@ -170,6 +174,7 @@ export interface RangeBillingRow {
    * to, without recomputing it itself. */
   monthRows: BillingRow[];
   totalSessionsAttended: number;
+  totalNoShows: number;
   totalMinutesAttended: number;
   totalAmountDue: number;
   totalAmountPaid: number;
@@ -555,12 +560,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       return data.students
         .filter((s) => s.active)
         .map((student) => {
-          // Billed by time: each attended session's length plus any extra
-          // time this student stayed, at their hourly rate.
+          // Billed by time: each charged session's length (attended, or a
+          // no-show -- didn't come, didn't tell) plus any extra time this
+          // student stayed, at their hourly rate.
           const attended = data.sessions.filter(
-            (s) => s.date.startsWith(monthKey) && s.attendance[student.id] === 'present',
+            (s) => s.date.startsWith(monthKey) && CHARGED_STATUSES.includes(s.attendance[student.id]),
           );
           const sessionsAttended = attended.length;
+          const noShowSessions = attended.filter((s) => s.attendance[student.id] === 'no-show').length;
           const minutesAttended = attended.reduce(
             (sum, s) => sum + s.durationMinutes + (s.extraMinutes?.[student.id] ?? 0),
             0,
@@ -590,7 +597,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             payment = { ...payment, amountDue };
           }
 
-          return { student, sessionsAttended, minutesAttended, amountDue, payment };
+          return { student, sessionsAttended, noShowSessions, minutesAttended, amountDue, payment };
         });
     },
     [data],
@@ -664,6 +671,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           const monthRows = perMonth.map((rows) => rows.find((r) => r.student.id === student.id)!);
           const totalSessionsAttended = monthRows.reduce((sum, r) => sum + r.sessionsAttended, 0);
           const totalMinutesAttended = monthRows.reduce((sum, r) => sum + r.minutesAttended, 0);
+          const totalNoShows = monthRows.reduce((sum, r) => sum + r.noShowSessions, 0);
           const totalAmountDue = Math.round(monthRows.reduce((sum, r) => sum + r.amountDue, 0) * 100) / 100;
           const totalAmountPaid = monthRows.reduce((sum, r) => sum + r.payment.amountPaid, 0);
           // $0 due with nothing paid is its own status, never "paid" --
@@ -683,6 +691,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             monthKeys,
             monthRows,
             totalSessionsAttended,
+            totalNoShows,
             totalMinutesAttended,
             totalAmountDue,
             totalAmountPaid,

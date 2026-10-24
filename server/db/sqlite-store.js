@@ -24,6 +24,10 @@
  *         sender_rule_students: "this Zelle sender pays for these
  *         students" or "not tutoring"), settings (key -> JSON value), and
  *         payments.method (zelle | cash | check | other).
+ *   v5 -- session_students.attendance may also be 'no-show' (didn't come,
+ *         didn't tell -- still charged). SQLite can't change a CHECK rule
+ *         in place, so that one table is rebuilt; upgradeSchema verifies
+ *         every row came across identical before committing.
  *
  * Moving v0 -> latest happens automatically the first time this opens an
  * old database (see migrateFromLegacy); a v1 database just gets the newer
@@ -40,7 +44,7 @@ const { DatabaseSync, backup } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest per-save snapshots get pruned
 const PRE_MIGRATION_PREFIX = 'pre-migration-'; // never pruned
 
@@ -177,8 +181,9 @@ const SCHEMA_V1 = `
   CREATE INDEX payments_by_student_month ON payments(student_id, month);
 `;
 
-// Each later schema version's changes, applied in order on top of v1. Only
-// ever additive (new columns/tables), so upgrading never rewrites data.
+// Each later schema version's changes, applied in order on top of v1.
+// Additive (new columns/tables) wherever possible; v5 is the one exception
+// -- it rebuilds session_students -- and upgradeSchema checks it row by row.
 const SCHEMA_UPGRADES = {
   2: `ALTER TABLE session_students ADD COLUMN extra_minutes INTEGER
         CHECK (extra_minutes IS NULL OR extra_minutes > 0)`,
@@ -251,6 +256,20 @@ const SCHEMA_UPGRADES = {
       updated_by TEXT,
       updated_at TEXT
     );
+  `,
+  5: `
+    CREATE TABLE session_students_v5 (
+      session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      student_id      TEXT NOT NULL REFERENCES students(id),
+      roster_position INTEGER,
+      attendance      TEXT CHECK (attendance IN ('present', 'absent', 'no-show')),
+      extra_minutes   INTEGER CHECK (extra_minutes IS NULL OR extra_minutes > 0),
+      PRIMARY KEY (session_id, student_id)
+    );
+    INSERT INTO session_students_v5 (session_id, student_id, roster_position, attendance, extra_minutes)
+      SELECT session_id, student_id, roster_position, attendance, extra_minutes FROM session_students;
+    DROP TABLE session_students;
+    ALTER TABLE session_students_v5 RENAME TO session_students;
   `,
 };
 
@@ -807,9 +826,24 @@ function createSqliteStore(dataDir) {
    * in one transaction (all or nothing). */
   function upgradeSchema(fromVersion) {
     preUpgradeSnapshot();
+    // Every attendance row, in a fixed order -- compared before and after,
+    // because v5 rebuilds this table (the one upgrade that copies data).
+    const attendanceRows = () =>
+      db
+        .prepare(
+          `SELECT session_id, student_id, roster_position, attendance, extra_minutes
+           FROM session_students ORDER BY session_id, student_id`,
+        )
+        .all()
+        .map((r) => JSON.stringify(r))
+        .join('\n');
     db.exec('BEGIN IMMEDIATE');
     try {
+      const before = fromVersion >= 2 ? attendanceRows() : null;
       applySchemaUpgrades(fromVersion);
+      if (before !== null && attendanceRows() !== before) {
+        throw new Error('attendance rows did not come across identical');
+      }
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
     } catch (err) {

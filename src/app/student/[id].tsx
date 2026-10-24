@@ -146,8 +146,8 @@ export default function StudentDetailScreen() {
               {s.isMakeup ? ' (rescheduled)' : ''}
             </ThemedText>
             <Badge
-              label={s.attendance[student.id] === 'present' ? 'Present' : 'Absent'}
-              tone={s.attendance[student.id] === 'present' ? 'primary' : 'danger'}
+              label={{ present: 'Present', absent: 'Absent', 'no-show': 'No show' }[s.attendance[student.id]]}
+              tone={({ present: 'primary', absent: 'danger', 'no-show': 'warning' } as const)[s.attendance[student.id]]}
             />
           </View>
         </Card>

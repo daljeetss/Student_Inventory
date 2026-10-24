@@ -33,7 +33,9 @@ export default function TodayScreen() {
     if (marked.length === 0) return { label: 'Not marked', tone: 'warning' as const };
     if (marked.length < occ.studentIds.length) return { label: 'Partially marked', tone: 'warning' as const };
     const allPresent = occ.studentIds.every((id) => occ.attendance[id] === 'present');
-    return allPresent ? { label: 'All present', tone: 'primary' as const } : { label: 'Has absences', tone: 'danger' as const };
+    if (allPresent) return { label: 'All present', tone: 'primary' as const };
+    const noShows = occ.studentIds.some((id) => occ.attendance[id] === 'no-show');
+    return noShows ? { label: 'Has a no-show', tone: 'warning' as const } : { label: 'Has absences', tone: 'danger' as const };
   };
 
   const reminderMessage = (occ: (typeof occurrences)[number], student: Student) => {

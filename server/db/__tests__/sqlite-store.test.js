@@ -109,7 +109,7 @@ describe('a new, empty store', () => {
     expect(tables).toEqual(
       expect.arrayContaining(['students', 'classes', 'class_students', 'class_slots', 'sessions', 'session_students', 'payments']),
     );
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(4);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(5);
   });
 });
 
@@ -164,6 +164,18 @@ describe('round-tripping every kind of record exactly', () => {
     const { extraMinutes, ...without } = s;
     await store.putRecord('sessions', s.id, without, 1);
     expect(withoutVersion(store.getResource('sessions'))).toEqual([without]);
+    store.close();
+  });
+
+  it("sessions with a no-show (charged, didn't come or tell) -- and still refuse made-up statuses", async () => {
+    const store = openStore(dataDir);
+    for (const id of ['s1', 's2']) await store.putRecord('students', id, student(id), null);
+    const s = session('x', null, ['s1', 's2'], { s1: 'no-show', s2: 'absent' });
+    await store.putRecord('sessions', 'x', s, null);
+    expect(withoutVersion(store.getResource('sessions'))).toEqual([s]);
+    await expect(
+      store.putRecord('sessions', 'y', session('y', null, ['s1'], { s1: 'late' }), null),
+    ).rejects.toThrow(ValidationError);
     store.close();
   });
 
@@ -481,8 +493,18 @@ describe('upgrading a v1 database (real tables, before extra time) to v2', () =>
     expect(store.getResource('sessions')[0].extraMinutes).toEqual({ s1: 30 });
     store.close();
 
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(4);
-    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v4-'))).toBe(true);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(5);
+    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v5-'))).toBe(true);
+  });
+
+  it('keeps every attendance mark through the v5 rebuild, then accepts no-shows', async () => {
+    makeV1Database(dataDir);
+    const store = openStore(dataDir);
+    expect(store.getResource('sessions')[0].attendance).toEqual({ s1: 'present' });
+    const { _version, ...x } = store.getResource('sessions')[0];
+    expect(await store.putRecord('sessions', 'x', { ...x, attendance: { s1: 'no-show' } }, 2)).toEqual({ ok: true, version: 3 });
+    expect(store.getResource('sessions')[0].attendance).toEqual({ s1: 'no-show' });
+    store.close();
   });
 
   it('refuses to open a database from a newer version of the app', () => {

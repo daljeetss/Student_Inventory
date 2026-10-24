@@ -94,7 +94,8 @@ function BillingRowCard({
         <Badge label={STATUS_LABEL[row.status]} tone={STATUS_TONE[row.status]} />
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        {row.totalSessionsAttended} session{row.totalSessionsAttended === 1 ? '' : 's'} ·{' '}
+        {row.totalSessionsAttended} session{row.totalSessionsAttended === 1 ? '' : 's'}
+        {row.totalNoShows > 0 ? ` (incl. ${row.totalNoShows} no-show${row.totalNoShows === 1 ? '' : 's'})` : ''} ·{' '}
         {formatHours(row.totalMinutesAttended)} × ${row.student.ratePerSession.toFixed(2)}/hr = $
         {row.totalAmountDue.toFixed(2)}
       </ThemedText>
@@ -126,6 +127,7 @@ function BillingRowCard({
                 row.totalSessionsAttended,
                 row.totalMinutesAttended,
                 row.totalAmountDue,
+                row.totalNoShows,
               )
             }
             onSent={() => onMessageSent(row)}

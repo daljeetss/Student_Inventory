@@ -100,7 +100,15 @@ while using the app.
   (sorted by start time within each day), with "No weekly time set yet"
   and "Inactive" sections at the end. The **Today** tab automatically shows
   what's scheduled for any given day based on this.
-- **Today** — tap a class to mark each student present/absent. If someone
+- **Today** — tap a class to mark each student:
+  - **Present** — came (charged).
+  - **Absent** — didn't come, **but let you know** — not charged, and you can
+    schedule a makeup.
+  - **No Show** — didn't come **and didn't tell you** — charged as if they
+    came. Billing and the WhatsApp reminder say so ("4 sessions incl. 1
+    no-show"), so the parent can see why.
+
+  If someone
   stayed longer than the class, tap **+ 30 min** under their name (as many
   times as needed; **− 30 min** to undo) — that extra time is billed for
   just that student. Then **Save Attendance**, which turns into a greyed-out **✓ Saved** once it's

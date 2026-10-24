@@ -3,11 +3,13 @@ import { Linking } from 'react-native';
 import { monthKeyLabel, monthRangeLabel } from '@/data/date';
 import { Student } from '@/data/types';
 
-/** "(4 sessions, 4.5 hours x $30.00/hour)" -- billing is by time. */
-function breakdown(student: Student, sessionsAttended: number, minutesAttended: number): string {
+/** "(4 sessions incl. 1 no-show, 4.5 hours x $30.00/hour)" -- billing is
+ * by time; no-shows are named so the parent sees why they're charged. */
+function breakdown(student: Student, sessionsAttended: number, minutesAttended: number, noShows: number): string {
   const hours = Math.round((minutesAttended / 60) * 100) / 100;
   return (
-    `${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'}, ` +
+    `${sessionsAttended} session${sessionsAttended === 1 ? '' : 's'}` +
+    `${noShows > 0 ? ` incl. ${noShows} no-show${noShows === 1 ? '' : 's'}` : ''}, ` +
     `${hours} hour${hours === 1 ? '' : 's'} x $${student.ratePerSession.toFixed(2)}/hour`
   );
 }
@@ -18,10 +20,11 @@ export function buildDueMessage(
   sessionsAttended: number,
   minutesAttended: number,
   amountDue: number,
+  noShows = 0,
 ): string {
   return (
     `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ${monthKeyLabel(monthKey)} ` +
-    `is $${amountDue.toFixed(2)} (${breakdown(student, sessionsAttended, minutesAttended)}). Thank you!`
+    `is $${amountDue.toFixed(2)} (${breakdown(student, sessionsAttended, minutesAttended, noShows)}). Thank you!`
   );
 }
 
@@ -35,11 +38,12 @@ export function buildDueMessageForRange(
   sessionsAttended: number,
   minutesAttended: number,
   amountDue: number,
+  noShows = 0,
 ): string {
   return (
     `Hi ${student.parentName}, this is a reminder that ${student.name}'s tutoring balance for ` +
     `${monthRangeLabel(fromMonthKey, toMonthKey)} is $${amountDue.toFixed(2)} ` +
-    `(${breakdown(student, sessionsAttended, minutesAttended)}). Thank you!`
+    `(${breakdown(student, sessionsAttended, minutesAttended, noShows)}). Thank you!`
   );
 }
 

@@ -40,7 +40,16 @@ export interface ClassGroup {
   createdAt: string;
 }
 
-export type AttendanceStatus = 'present' | 'absent';
+/**
+ * - present: came -- charged.
+ * - absent: didn't come, but let us know -- NOT charged (a makeup can be
+ *   scheduled).
+ * - no-show: didn't come and didn't tell us -- charged as if they came.
+ */
+export type AttendanceStatus = 'present' | 'absent' | 'no-show';
+
+/** Statuses that are billed. */
+export const CHARGED_STATUSES: AttendanceStatus[] = ['present', 'no-show'];
 
 export interface SessionRecord {
   id: string;
