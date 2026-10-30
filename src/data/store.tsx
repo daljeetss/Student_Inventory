@@ -5,6 +5,7 @@ import { makeId } from '@/data/id';
 import { lastConflictBy, loadMe, loadResource, Me, reloadResource, ResourceName, saveChanges, SaveOutcome } from '@/data/storage';
 import { ParsedDeposit } from '@/data/bank-csv';
 import { normalizeName, OpenItem } from '@/data/reconcile';
+import { lastMarkedOnOrAfter, rosterOn } from '@/data/roster';
 import {
   Allocation,
   AppData,
@@ -44,6 +45,20 @@ export interface Occurrence {
   /** See SessionRecord.extraMinutes -- {} when nobody stayed extra. */
   extraMinutes: Record<string, number>;
   persisted: boolean;
+  /** Where students from THIS session went: a reschedule (they're no
+   * longer on this roster) or a makeup for an absence (still on it, marked
+   * absent). One entry per student per follow-up session. */
+  followUps: FollowUp[];
+  /** For a rescheduled/makeup session: the session it came from. */
+  rescheduledFrom?: { recordId: string; date: string; startTime: string; groupName: string };
+}
+
+export interface FollowUp {
+  studentId: string;
+  /** The rescheduled/makeup session's id (to open it). */
+  recordId: string;
+  date: string;
+  startTime: string;
 }
 
 interface AppDataContextValue {
@@ -62,6 +77,14 @@ interface AppDataContextValue {
 
   addGroup: (input: Omit<ClassGroup, 'id' | 'createdAt'>) => ClassGroup;
   updateGroup: (id: string, patch: Partial<Omit<ClassGroup, 'id'>>) => void;
+  /** Takes a student out of a class FROM a date: they stay on every
+   * earlier date (their history and attendance are untouched), and are
+   * gone from `fromDate` on. Refused -- returning the last date -- if they
+   * already have attendance marked in this class on/after `fromDate`
+   * (that's still billed, so it mustn't silently disappear). */
+  removeFromClassFrom: (groupId: string, studentId: string, fromDate: string) => { ok: true } | { ok: false; lastMarked: string };
+  /** Undoes removeFromClassFrom: back in the class on every date. */
+  restoreToClass: (groupId: string, studentId: string) => void;
 
   getOccurrencesForDate: (date: Date) => Occurrence[];
   /** `extraMinutes` (optional): extra time per student on top of the
@@ -350,7 +373,61 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const updateGroup = useCallback<AppDataContextValue['updateGroup']>(
     (id, patch) => {
-      persistGroups(dataRef.current.groups.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+      persistGroups(
+        dataRef.current.groups.map((g) => {
+          if (g.id !== id) return g;
+          const next = { ...g, ...patch };
+          // Someone added back to the class is a full member again, on
+          // every date -- not also a "former" student.
+          if (patch.studentIds && next.formerStudents) {
+            const former = next.formerStudents.filter((f) => !patch.studentIds!.includes(f.studentId));
+            if (former.length > 0) next.formerStudents = former;
+            else delete next.formerStudents;
+          }
+          return next;
+        }),
+      );
+    },
+    [persistGroups],
+  );
+
+  const removeFromClassFrom = useCallback<AppDataContextValue['removeFromClassFrom']>(
+    (groupId, studentId, fromDate) => {
+      const lastMarked = lastMarkedOnOrAfter(dataRef.current.sessions, groupId, studentId, fromDate);
+      if (lastMarked) return { ok: false, lastMarked };
+      persistGroups(
+        dataRef.current.groups.map((g) =>
+          g.id !== groupId
+            ? g
+            : {
+                ...g,
+                studentIds: g.studentIds.filter((sid) => sid !== studentId),
+                formerStudents: [
+                  ...(g.formerStudents ?? []).filter((f) => f.studentId !== studentId),
+                  { studentId, leftOn: fromDate },
+                ],
+              },
+        ),
+      );
+      return { ok: true };
+    },
+    [persistGroups],
+  );
+
+  const restoreToClass = useCallback<AppDataContextValue['restoreToClass']>(
+    (groupId, studentId) => {
+      persistGroups(
+        dataRef.current.groups.map((g) => {
+          if (g.id !== groupId) return g;
+          const former = (g.formerStudents ?? []).filter((f) => f.studentId !== studentId);
+          const { formerStudents: _old, ...rest } = g;
+          return {
+            ...rest,
+            studentIds: g.studentIds.includes(studentId) ? g.studentIds : [...g.studentIds, studentId],
+            ...(former.length > 0 ? { formerStudents: former } : {}),
+          };
+        }),
+      );
     },
     [persistGroups],
   );
@@ -377,11 +454,12 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             groupId: group.id,
             groupName: group.name,
             isMakeup: false,
-            studentIds: group.studentIds,
+            studentIds: rosterOn(group, dateKey),
             rosterCustomized: false,
             attendance: {},
             extraMinutes: {},
             persisted: false,
+            followUps: [],
           });
         }
       }
@@ -401,7 +479,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         // deliberately shrinking a roster). A makeup's studentIds is
         // always an intentional one-off list, never auto-synced; same if
         // the group itself was deleted.
-        const studentIds = !record.isMakeup && group && !record.rosterCustomized ? group.studentIds : record.studentIds;
+        const studentIds =
+          !record.isMakeup && group && !record.rosterCustomized ? rosterOn(group, record.date) : record.studentIds;
+        // Sessions created from this one (students moved to another time,
+        // or a makeup for an absence) -- so this one can say where they went.
+        const followUps: FollowUp[] = data.sessions
+          .filter((m) => m.makeupForRecordId === record.id)
+          .flatMap((m) =>
+            m.studentIds.map((studentId) => ({ studentId, recordId: m.id, date: m.date, startTime: m.startTime })),
+          );
+        const source = record.makeupForRecordId ? data.sessions.find((x) => x.id === record.makeupForRecordId) : undefined;
+        const sourceGroup = source?.groupId ? data.groups.find((g) => g.id === source.groupId) : undefined;
         occurrences.push({
           id: record.id,
           date: record.date,
@@ -416,6 +504,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           attendance: record.attendance,
           extraMinutes: record.extraMinutes ?? {},
           persisted: true,
+          followUps,
+          ...(source
+            ? {
+                rescheduledFrom: {
+                  recordId: source.id,
+                  date: source.date,
+                  startTime: source.startTime,
+                  groupName: sourceGroup?.name ?? 'Session',
+                },
+              }
+            : {}),
         });
       }
 
@@ -976,6 +1075,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       updateStudent,
       addGroup,
       updateGroup,
+      removeFromClassFrom,
+      restoreToClass,
       getOccurrencesForDate,
       saveAttendance,
       scheduleMakeup,
@@ -1004,6 +1105,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       updateStudent,
       addGroup,
       updateGroup,
+      removeFromClassFrom,
+      restoreToClass,
       getOccurrencesForDate,
       saveAttendance,
       scheduleMakeup,

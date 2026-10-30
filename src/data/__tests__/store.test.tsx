@@ -590,6 +590,117 @@ describe('AppDataProvider / useAppData', () => {
     expect(grouped.days[0].classes[0].students.map((s) => s.id).sort()).toEqual([a!.id, b!.id, c!.id].sort());
   });
 
+  // A class's own date shows where its moved students went, and the
+  // rescheduled session shows where it came from.
+  it('links a class to the students rescheduled out of it, and back', async () => {
+    const { result } = await setup();
+    const ids: string[] = [];
+    for (const name of ['Ann', 'Bo', 'Cy', 'Di']) {
+      await act(async () => {
+        ids.push(result.current.addStudent({ name, grade: '3', parentName: 'P', parentPhone: '1', ratePerSession: 30, active: true }).id);
+      });
+    }
+    await act(async () => {
+      result.current.addGroup({
+        name: 'Friday Group', type: 'group', studentIds: ids,
+        schedule: [{ dayOfWeek: 5, startTime: '16:00', durationMinutes: 60 }], active: true,
+      });
+    });
+    const friday = new Date(2026, 9, 30); // Fri Oct 30 2026
+    const occ = result.current.getOccurrencesForDate(friday)[0];
+    let moved: { id: string } | undefined;
+    await act(async () => {
+      moved = result.current.rescheduleStudents({ source: occ, studentIds: [ids[0], ids[1]], date: '2026-10-30', startTime: '10:30', durationMinutes: 60 });
+    });
+    const shrunk = result.current.getOccurrencesForDate(friday).find((o) => o.id === occ.id)!;
+    await act(async () => {
+      result.current.saveAttendance(shrunk, { [ids[2]]: 'absent', [ids[3]]: 'absent' });
+    });
+
+    const day = result.current.getOccurrencesForDate(friday);
+    const original = day.find((o) => o.id === occ.id)!;
+    expect(original.studentIds).toEqual([ids[2], ids[3]]);
+    expect(original.followUps).toEqual([
+      { studentId: ids[0], recordId: moved!.id, date: '2026-10-30', startTime: '10:30' },
+      { studentId: ids[1], recordId: moved!.id, date: '2026-10-30', startTime: '10:30' },
+    ]);
+    const rescheduled = day.find((o) => o.id === moved!.id)!;
+    expect(rescheduled.rescheduledFrom).toEqual({ recordId: occ.id, date: '2026-10-30', startTime: '16:00', groupName: 'Friday Group' });
+  });
+
+  describe('leaving a class from a date', () => {
+    // Ann and Bo in a Monday class; Bo marked present on Mon Oct 26.
+    async function setupLeaving() {
+      const rendered = await setup();
+      const { result } = rendered;
+      const ids: string[] = [];
+      for (const name of ['Ann', 'Bo']) {
+        await act(async () => {
+          ids.push(result.current.addStudent({ name, grade: '3', parentName: 'P', parentPhone: '1', ratePerSession: 30, active: true }).id);
+        });
+      }
+      let groupId = '';
+      await act(async () => {
+        groupId = result.current.addGroup({
+          name: 'Monday', type: 'group', studentIds: ids,
+          schedule: [{ dayOfWeek: 1, startTime: '16:00', durationMinutes: 60 }], active: true,
+        }).id;
+      });
+      const oct26 = result.current.getOccurrencesForDate(new Date(2026, 9, 26))[0];
+      await act(async () => {
+        result.current.saveAttendance(oct26, { [ids[0]]: 'present', [ids[1]]: 'present' });
+      });
+      return { ...rendered, ann: ids[0], bo: ids[1], groupId };
+    }
+    const rosterFor = (result: { current: ReturnType<typeof useAppData> }, d: Date) =>
+      result.current.getOccurrencesForDate(d)[0].studentIds;
+
+    it('keeps them on earlier dates (with their attendance) and drops them from the date on', async () => {
+      const { result, ann, bo, groupId } = await setupLeaving();
+      let outcome;
+      await act(async () => {
+        outcome = result.current.removeFromClassFrom(groupId, bo, '2026-11-02');
+      });
+      expect(outcome).toEqual({ ok: true });
+      expect(rosterFor(result, new Date(2026, 9, 26))).toEqual([ann, bo]); // Oct 26: still there
+      expect(result.current.getOccurrencesForDate(new Date(2026, 9, 26))[0].attendance[bo]).toBe('present');
+      expect(rosterFor(result, new Date(2026, 10, 2))).toEqual([ann]); // Nov 2 on: gone
+      expect(rosterFor(result, new Date(2026, 10, 9))).toEqual([ann]);
+      expect(result.current.data.groups[0]).toMatchObject({ studentIds: [ann], formerStudents: [{ studentId: bo, leftOn: '2026-11-02' }] });
+      expect(result.current.getMonthlyBilling('2026-10').find((r) => r.student.id === bo)!.amountDue).toBe(30); // still billed
+    });
+
+    it("refuses a date that would hide attendance that's already marked (and billed)", async () => {
+      const { result, bo, groupId } = await setupLeaving();
+      let outcome;
+      await act(async () => {
+        outcome = result.current.removeFromClassFrom(groupId, bo, '2026-10-19');
+      });
+      expect(outcome).toEqual({ ok: false, lastMarked: '2026-10-26' });
+      expect(result.current.data.groups[0].studentIds).toContain(bo);
+    });
+
+    it('undo, or adding them back to the class, makes them a full member again', async () => {
+      const { result, bo, groupId } = await setupLeaving();
+      await act(async () => {
+        result.current.removeFromClassFrom(groupId, bo, '2026-11-02');
+      });
+      await act(async () => {
+        result.current.restoreToClass(groupId, bo);
+      });
+      expect(result.current.data.groups[0].formerStudents).toBeUndefined();
+      expect(rosterFor(result, new Date(2026, 10, 9))).toContain(bo);
+
+      await act(async () => {
+        result.current.removeFromClassFrom(groupId, bo, '2026-11-02');
+      });
+      await act(async () => {
+        result.current.updateGroup(groupId, { studentIds: [...result.current.data.groups[0].studentIds, bo] });
+      });
+      expect(result.current.data.groups[0].formerStudents).toBeUndefined();
+    });
+  });
+
   describe('billing', () => {
     async function setupBillingScenario() {
       const rendered = await setup();

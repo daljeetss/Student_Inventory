@@ -7,9 +7,10 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ChipSelect } from '@/components/ui/chip-select';
+import { DatePickerField } from '@/components/ui/date-picker-field';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
-import { formatDateLabel, formatMinutes, formatTime } from '@/data/date';
+import { formatDateLabel, formatMinutes, formatTime, toDateKey } from '@/data/date';
 import { useAppData } from '@/data/store';
 import { Grade } from '@/data/types';
 import { alert } from '@/utils/alert';
@@ -21,7 +22,7 @@ const GRADE_OPTIONS: { value: Grade; label: string }[] = ['K', '1', '2', '3', '4
 
 export default function StudentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { data, updateStudent, can } = useAppData();
+  const { data, updateStudent, removeFromClassFrom, can } = useAppData();
   const student = data.students.find((s) => s.id === id);
 
   const [editing, setEditing] = useState(false);
@@ -31,6 +32,7 @@ export default function StudentDetailScreen() {
   const [parentPhone, setParentPhone] = useState(student?.parentPhone ?? '');
   const [rate, setRate] = useState(student ? String(student.ratePerSession) : '');
   const [notes, setNotes] = useState(student?.notes ?? '');
+  const [leaveDate, setLeaveDate] = useState(() => toDateKey(new Date()));
 
   if (!student) {
     return (
@@ -115,6 +117,37 @@ export default function StudentDetailScreen() {
           <ThemedText themeColor="textSecondary">{student.notes}</ThemedText>
         </Card>
       )}
+
+      {/* An inactive student still listed in classes: take them out from a
+          date, keeping their earlier classes and attendance as they were. */}
+      {(() => {
+        const stillIn = data.groups.filter((g) => g.studentIds.includes(student.id));
+        if (student.active || stillIn.length === 0 || !can('classes:write')) return null;
+        const removeFromAll = () => {
+          const blocked: string[] = [];
+          for (const g of stillIn) {
+            const result = removeFromClassFrom(g.id, student.id, leaveDate);
+            if (!result.ok) blocked.push(`${g.name} (attendance on ${formatDateLabel(result.lastMarked)})`);
+          }
+          if (blocked.length > 0) {
+            alert(
+              'Not removed from every class',
+              `${student.name} still has attendance marked on/after that date in: ${blocked.join(', ')}. Pick a later date for those.`,
+            );
+          }
+        };
+        return (
+          <Card>
+            <ThemedText type="smallBold">Still in {stillIn.length === 1 ? 'a class' : `${stillIn.length} classes`}</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">
+              {stillIn.map((g) => g.name).join(', ')} — {student.name} is inactive but still on {stillIn.length === 1 ? 'its' : 'their'}{' '}
+              roster. Remove them from a date: earlier classes and attendance stay as they were.
+            </ThemedText>
+            <DatePickerField label="Not in these classes from" value={leaveDate} onChange={setLeaveDate} />
+            <Button title={`Remove from ${stillIn.length === 1 ? 'the class' : 'all'} from ${formatDateLabel(leaveDate)}`} variant="danger" onPress={removeFromAll} />
+          </Card>
+        );
+      })()}
 
       {can('students:write') && (
         <View style={{ flexDirection: 'row', gap: 10 }}>

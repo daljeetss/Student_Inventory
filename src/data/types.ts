@@ -34,7 +34,13 @@ export interface ClassGroup {
   id: string;
   name: string;
   type: ClassType;
+  /** Current students -- on every date of this class, past ones included
+   * (editing this list fixes the class's whole history). */
   studentIds: string[];
+  /** Students who LEFT this class from a date: still on its roster for
+   * dates before `leftOn` (their history stays), not from it on. See
+   * rosterOn in src/data/roster.ts. Never also in studentIds. */
+  formerStudents?: { studentId: string; leftOn: string }[];
   schedule: WeeklySlot[];
   active: boolean;
   createdAt: string;

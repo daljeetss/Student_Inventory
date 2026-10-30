@@ -28,6 +28,9 @@
  *         didn't tell -- still charged). SQLite can't change a CHECK rule
  *         in place, so that one table is rebuilt; upgradeSchema verifies
  *         every row came across identical before committing.
+ *   v6 -- class_former_students: students who LEFT a class from a date
+ *         (ClassGroup.formerStudents) -- still on its roster for dates
+ *         before that, not from it on.
  *
  * Moving v0 -> latest happens automatically the first time this opens an
  * old database (see migrateFromLegacy); a v1 database just gets the newer
@@ -44,7 +47,7 @@ const { DatabaseSync, backup } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const MAX_BACKUPS = 200; // ~200 saves of headroom before the oldest per-save snapshots get pruned
 const PRE_MIGRATION_PREFIX = 'pre-migration-'; // never pruned
 
@@ -69,7 +72,7 @@ const PAYMENT_METHODS = ['zelle', 'cash', 'check', 'other'];
 // later can't be silently lost just because this file wasn't updated too.
 const KNOWN_FIELDS = {
   students: ['id', 'name', 'grade', 'parentName', 'parentPhone', 'ratePerSession', 'notes', 'active', 'createdAt'],
-  classes: ['id', 'name', 'type', 'studentIds', 'schedule', 'active', 'createdAt'],
+  classes: ['id', 'name', 'type', 'studentIds', 'formerStudents', 'schedule', 'active', 'createdAt'],
   sessions: [
     'id', 'date', 'startTime', 'durationMinutes', 'groupId', 'isMakeup', 'makeupForRecordId',
     'studentIds', 'rosterCustomized', 'attendance', 'extraMinutes', 'notes', 'createdAt',
@@ -271,6 +274,17 @@ const SCHEMA_UPGRADES = {
     DROP TABLE session_students;
     ALTER TABLE session_students_v5 RENAME TO session_students;
   `,
+  6: `
+    -- Students who left a class: on its roster for dates before left_on,
+    -- not from left_on onward.
+    CREATE TABLE class_former_students (
+      class_id   TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES students(id),
+      left_on    TEXT NOT NULL,
+      position   INTEGER NOT NULL,
+      PRIMARY KEY (class_id, student_id)
+    );
+  `,
 };
 
 /** A problem with the data a client sent (bad shape, or a link to a
@@ -313,6 +327,20 @@ function validate(resource, record) {
       // anything else rather than silently dropping it.
       const unknown = Object.keys(slot).filter((k) => !['dayOfWeek', 'startTime', 'durationMinutes'].includes(k));
       if (unknown.length > 0) throw new ValidationError(`Unknown schedule field(s): ${unknown.join(', ')}`);
+    }
+    if (record.formerStudents !== undefined) {
+      check(record, 'formerStudents', 'array');
+      for (const f of record.formerStudents) {
+        if (!f || typeof f !== 'object') throw new ValidationError('formerStudents entries must be objects');
+        check(f, 'studentId', 'string');
+        check(f, 'leftOn', 'string');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(f.leftOn)) throw new ValidationError('leftOn must be a YYYY-MM-DD date');
+        const unknown = Object.keys(f).filter((k) => !['studentId', 'leftOn'].includes(k));
+        if (unknown.length > 0) throw new ValidationError(`Unknown formerStudents field(s): ${unknown.join(', ')}`);
+        if (record.studentIds.includes(f.studentId)) {
+          throw new ValidationError('A student can not be both current and former in the same class');
+        }
+      }
     }
   } else if (resource === 'sessions') {
     check(record, 'date', 'string');
@@ -441,6 +469,11 @@ function createSqliteStore(dataDir) {
         'INSERT INTO class_slots (class_id, position, day_of_week, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?)',
       );
       c.schedule.forEach((slot, i) => addSlot.run(c.id, i, slot.dayOfWeek, slot.startTime, slot.durationMinutes));
+      db.prepare('DELETE FROM class_former_students WHERE class_id = ?').run(c.id);
+      const addFormer = db.prepare(
+        'INSERT INTO class_former_students (class_id, student_id, left_on, position) VALUES (?, ?, ?, ?)',
+      );
+      (c.formerStudents ?? []).forEach((f, i) => addFormer.run(c.id, f.studentId, f.leftOn, i));
     },
 
     sessions(s, version, seq) {
@@ -545,13 +578,19 @@ function createSqliteStore(dataDir) {
       const rows = db.prepare(`SELECT * FROM classes ${where} ORDER BY seq`).all(...args);
       const students = db.prepare('SELECT student_id FROM class_students WHERE class_id = ? ORDER BY position');
       const slots = db.prepare('SELECT * FROM class_slots WHERE class_id = ? ORDER BY position');
-      return rows.map((r) => ({
+      const former = tableExists('class_former_students')
+        ? db.prepare('SELECT student_id, left_on FROM class_former_students WHERE class_id = ? ORDER BY position')
+        : null;
+      return rows.map((r) => {
+        const formerStudents = former ? former.all(r.id).map((f) => ({ studentId: f.student_id, leftOn: f.left_on })) : [];
+        return {
         record: withExtra(
           {
             id: r.id,
             name: r.name,
             type: r.type,
             studentIds: students.all(r.id).map((s) => s.student_id),
+            ...(formerStudents.length > 0 ? { formerStudents } : {}),
             schedule: slots.all(r.id).map((s) => ({
               dayOfWeek: s.day_of_week,
               startTime: s.start_time,
@@ -563,7 +602,8 @@ function createSqliteStore(dataDir) {
           r.extra,
         ),
         version: r.version,
-      }));
+        };
+      });
     },
 
     sessions(where = '', args = []) {

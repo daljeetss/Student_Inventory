@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { View } from 'react-native';
+import { Pressable, View } from 'react-native';
 
 import { MakeupForm, MakeupSelection } from '@/components/makeup-form';
 import { RescheduleForm } from '@/components/reschedule-form';
@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
 import { formatDateLabel, formatMinutes, formatTime, fromDateKey } from '@/data/date';
+import { movedStudentIds } from '@/data/occurrence-status';
 import { useAppData } from '@/data/store';
 import { AttendanceStatus, Student } from '@/data/types';
 import { alert } from '@/utils/alert';
@@ -128,6 +129,33 @@ export default function SessionScreen() {
         {formatMinutes(occurrence.durationMinutes)}
       </ThemedText>
 
+      {occurrence.rescheduledFrom && (
+        <ThemedText type="small" themeColor="textSecondary">
+          Rescheduled from {occurrence.rescheduledFrom.groupName} · {formatDateLabel(occurrence.rescheduledFrom.date)} ·{' '}
+          {formatTime(occurrence.rescheduledFrom.startTime)}
+        </ThemedText>
+      )}
+
+      {movedStudentIds(occurrence).length > 0 && (
+        <Card>
+          <ThemedText type="smallBold">Rescheduled to another time</ThemedText>
+          {occurrence.followUps
+            .filter((f) => movedStudentIds(occurrence).includes(f.studentId))
+            .map((f) => (
+              <Pressable
+                key={`${f.recordId}_${f.studentId}`}
+                onPress={() => router.push({ pathname: '/session/[id]', params: { id: f.recordId, date: f.date } })}>
+                <ThemedText type="small">
+                  {studentName(f.studentId)} → {formatDateLabel(f.date)} · {formatTime(f.startTime)}{' '}
+                  <ThemedText type="small" themeColor="primary">
+                    Open ›
+                  </ThemedText>
+                </ThemedText>
+              </Pressable>
+            ))}
+        </Card>
+      )}
+
       {!reschedulingOpen && occurrence.studentIds.length > 0 && (
         <Button title="Reschedule Students" variant="ghost" onPress={() => setReschedulingOpen(true)} />
       )}
@@ -207,7 +235,11 @@ export default function SessionScreen() {
           )}
           {occurrence.persisted && occurrence.attendance[sid] === 'absent' && !needsMakeup(occurrence.id, sid) && (
             <ThemedText type="small" themeColor="textSecondary">
-              Makeup already scheduled
+              Makeup:{' '}
+              {occurrence.followUps
+                .filter((f) => f.studentId === sid)
+                .map((f) => `${formatDateLabel(f.date)} · ${formatTime(f.startTime)}`)
+                .join(', ') || 'scheduled'}
             </ThemedText>
           )}
         </Card>

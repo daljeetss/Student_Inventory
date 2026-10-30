@@ -109,7 +109,7 @@ describe('a new, empty store', () => {
     expect(tables).toEqual(
       expect.arrayContaining(['students', 'classes', 'class_students', 'class_slots', 'sessions', 'session_students', 'payments']),
     );
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(5);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(6);
   });
 });
 
@@ -135,6 +135,27 @@ describe('round-tripping every kind of record exactly', () => {
     });
     await store.putRecord('classes', 'c', c, null);
     expect(withoutVersion(store.getResource('classes'))).toEqual([c]);
+    store.close();
+  });
+
+  it('classes with former students (left from a date)', async () => {
+    const store = openStore(dataDir);
+    for (const id of ['s1', 's2', 's3']) await store.putRecord('students', id, student(id), null);
+    const c = klass('c', ['s1', 's2'], { formerStudents: [{ studentId: 's3', leftOn: '2026-10-30' }] });
+    await store.putRecord('classes', 'c', c, null);
+    expect(withoutVersion(store.getResource('classes'))).toEqual([c]);
+
+    // Brought back: no former entry left behind.
+    const back = klass('c', ['s1', 's2', 's3']);
+    await store.putRecord('classes', 'c', back, 1);
+    expect(withoutVersion(store.getResource('classes'))).toEqual([back]);
+
+    await expect(
+      store.putRecord('classes', 'c', klass('c', ['s1'], { formerStudents: [{ studentId: 's1', leftOn: '2026-10-30' }] }), 2),
+    ).rejects.toThrow(/both current and former/);
+    await expect(
+      store.putRecord('classes', 'c', klass('c', ['s1'], { formerStudents: [{ studentId: 's2', leftOn: 'Oct 30' }] }), 2),
+    ).rejects.toThrow(/YYYY-MM-DD/);
     store.close();
   });
 
@@ -493,8 +514,8 @@ describe('upgrading a v1 database (real tables, before extra time) to v2', () =>
     expect(store.getResource('sessions')[0].extraMinutes).toEqual({ s1: 30 });
     store.close();
 
-    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(5);
-    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v5-'))).toBe(true);
+    expect(inspect(dataDir, 'PRAGMA user_version')[0].user_version).toBe(6);
+    expect(fs.readdirSync(path.join(dataDir, 'backups')).some((f) => f.startsWith('pre-migration-v6-'))).toBe(true);
   });
 
   it('keeps every attendance mark through the v5 rebuild, then accepts no-shows', async () => {

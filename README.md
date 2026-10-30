@@ -100,6 +100,12 @@ while using the app.
   (sorted by start time within each day), with "No weekly time set yet"
   and "Inactive" sections at the end. The **Today** tab automatically shows
   what's scheduled for any given day based on this.
+  **When a student leaves a class**, use **Remove from a date…** on the
+  class's page (or, once they're marked inactive, the card on their own
+  page): they stay on every earlier date with their attendance, and are
+  gone from that date on. "Former students" lists them, with Undo. (Tapping
+  a name off the class's student list still removes them from every date —
+  that's for fixing a mistake.)
 - **Today** — tap a class to mark each student:
   - **Present** — came (charged).
   - **Absent** — didn't come, **but let you know** — not charged, and you can
@@ -133,7 +139,12 @@ while using the app.
   this once." Pick who's moving, then the same join-an-existing-class-or-
   custom-time picker as makeups. Tomorrow's class then correctly shows
   only the student who's still coming then — the moved students don't
-  show up twice.
+  show up twice. The original class still says where they went
+  ("Rescheduled: Ava, Ben → 10:30 AM"; tap one on the attendance screen
+  to open that session), its status counts them as handled ("Has absences
+  · 2 rescheduled", or "All rescheduled" if everyone moved), and the new
+  session says where it came from ("From 4:00 PM"). An absent student's
+  makeup shows its date and time.
   Each class also has
   a **Remind via WhatsApp** button for an on-demand "you have class..."
   nudge — one tap shows every student in the class with their own editable,

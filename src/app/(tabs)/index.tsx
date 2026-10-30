@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Screen } from '@/components/ui/screen';
 import { addDays, formatDateLabel, formatTime, toDateKey } from '@/data/date';
+import { movedStudentIds, occurrenceStatus } from '@/data/occurrence-status';
 import { useAppData } from '@/data/store';
 import { Student } from '@/data/types';
 import { buildClassReminderMessage } from '@/data/whatsapp';
@@ -28,14 +29,17 @@ export default function TodayScreen() {
 
   const studentName = (id: string) => data.students.find((s) => s.id === id)?.name ?? 'Unknown';
 
-  const summarize = (occ: (typeof occurrences)[number]) => {
-    const marked = occ.studentIds.filter((id) => occ.attendance[id]);
-    if (marked.length === 0) return { label: 'Not marked', tone: 'warning' as const };
-    if (marked.length < occ.studentIds.length) return { label: 'Partially marked', tone: 'warning' as const };
-    const allPresent = occ.studentIds.every((id) => occ.attendance[id] === 'present');
-    if (allPresent) return { label: 'All present', tone: 'primary' as const };
-    const noShows = occ.studentIds.some((id) => occ.attendance[id] === 'no-show');
-    return noShows ? { label: 'Has a no-show', tone: 'warning' as const } : { label: 'Has absences', tone: 'danger' as const };
+  /** "Ava, Ben → 10:30 AM" (same day) or "→ Thu, Nov 5, 10:00 AM". */
+  const movedLine = (occ: (typeof occurrences)[number]) => {
+    const moved = movedStudentIds(occ);
+    if (moved.length === 0) return null;
+    const byWhen = new Map<string, string[]>();
+    for (const f of occ.followUps.filter((x) => moved.includes(x.studentId))) {
+      const when =
+        f.date === occ.date ? formatTime(f.startTime) : `${formatDateLabel(f.date)}, ${formatTime(f.startTime)}`;
+      byWhen.set(when, [...(byWhen.get(when) ?? []), studentName(f.studentId)]);
+    }
+    return [...byWhen].map(([when, names]) => `${names.join(', ')} → ${when}`).join(' · ');
   };
 
   const reminderMessage = (occ: (typeof occurrences)[number], student: Student) => {
@@ -80,25 +84,41 @@ export default function TodayScreen() {
 
       <View style={{ gap: 10 }}>
         {occurrences.map((occ) => {
-          const summary = summarize(occ);
+          const summary = occurrenceStatus(occ);
+          const moved = movedLine(occ);
           const students = occ.studentIds.map((id) => data.students.find((s) => s.id === id)).filter((s): s is Student => !!s);
           return (
             <Card key={occ.id}>
               <Pressable onPress={() => router.push({ pathname: '/session/[id]', params: { id: occ.id, date: occ.date } })}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                  <View style={{ flex: 1 }}>
                     <ThemedText type="smallBold">
                       {formatTime(occ.startTime)} · {occ.groupName}
                       {occ.isMakeup ? ' (rescheduled)' : ''}
                     </ThemedText>
-                    <ThemedText type="small" themeColor="textSecondary">
-                      {occ.studentIds.map(studentName).join(', ')}
-                    </ThemedText>
+                    {occ.studentIds.length > 0 && (
+                      <ThemedText type="small" themeColor="textSecondary">
+                        {occ.studentIds.map(studentName).join(', ')}
+                      </ThemedText>
+                    )}
+                    {moved && (
+                      <ThemedText type="small" themeColor="textSecondary">
+                        Rescheduled: {moved}
+                      </ThemedText>
+                    )}
+                    {occ.rescheduledFrom && (
+                      <ThemedText type="small" themeColor="textSecondary">
+                        From{' '}
+                        {occ.rescheduledFrom.date === occ.date
+                          ? formatTime(occ.rescheduledFrom.startTime)
+                          : `${formatDateLabel(occ.rescheduledFrom.date)}, ${formatTime(occ.rescheduledFrom.startTime)}`}
+                      </ThemedText>
+                    )}
                   </View>
                   <Badge label={summary.label} tone={summary.tone} />
                 </View>
               </Pressable>
-              {!isPastDate && (
+              {!isPastDate && students.length > 0 && (
                 <WhatsAppSendButton students={students} buildMessage={(student) => reminderMessage(occ, student)} label="Remind via WhatsApp" />
               )}
             </Card>

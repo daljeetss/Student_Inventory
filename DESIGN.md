@@ -604,6 +604,33 @@ makeup, just not compensating for a recorded absence), and the *source*
 occurrence is persisted with only the students who AREN'T moving, so they
 don't show up on both dates.
 
+**Showing where moved students went.** `getOccurrencesForDate` gives each
+persisted occurrence `followUps` — every session whose `makeupForRecordId`
+points at it, per student (a reschedule, or a makeup for an absence) — and
+a rescheduled/makeup occurrence gets `rescheduledFrom` (the source
+session's date, time and class). Students in `followUps` but no longer on
+the roster are "moved" (`movedStudentIds`); `occurrenceStatus`
+(`src/data/occurrence-status.ts`, pure) counts them as handled, so a class
+with 2 absent + 2 moved is "Has absences · 2 rescheduled" and one with
+everyone moved is "All rescheduled" — before this, moved students simply
+vanished from the original date, and an emptied class read "Not marked".
+
+**Leaving a class from a date.** Editing `ClassGroup.studentIds` changes a
+class's roster on *every* date (that's how a mistake gets fixed
+retroactively — see above). For a student who *leaves*,
+`removeFromClassFrom(groupId, studentId, fromDate)` instead moves them to
+`ClassGroup.formerStudents` with `leftOn`; `rosterOn(group, date)`
+(`src/data/roster.ts`) includes a former student only on dates before
+`leftOn`, so earlier dates — and their attendance — stay exactly as they
+were. It's refused (returning the last date) if they have attendance
+marked in that class on/after `fromDate`, since that's billed and mustn't
+silently disappear. `restoreToClass` (Undo), or adding them back through
+the student list, makes them a full member again. Stored in
+`class_former_students` (schema v6, additive). An inactive student still in
+classes gets a "remove from all their classes from [date]" card on their
+page. Already-arranged one-off sessions (a reschedule or makeup) aren't
+affected.
+
 That second part needed a new field, `SessionRecord.rosterCustomized`.
 Recall from above that a regular record's roster normally tracks its
 group's *current* membership live, specifically so correcting a class's
